@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zharp-logs"
+dynamic = ["version"]
+description = "Send your Python app's logs and uncaught exceptions to Zharp. No dependencies."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Zharp", email = "support@zharp.io" }]
+requires-python = ">=3.8"
+keywords = ["logging", "logs", "observability", "monitoring", "zharp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: System :: Logging",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://zharp.io"
+Documentation = "https://zharp.io/docs/sdks/python"
+Source = "https://github.com/zharp-io/zharp-python-lib"
+
+[tool.setuptools.dynamic]
+version = { attr = "zharp_logs._version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+zharp_logs = ["py.typed"]
