@@ -172,6 +172,36 @@ its own sender on its first log. `zharp_logs.flush()` sends what's queued and wa
 by default) — useful at the end of a job or a serverless function. `zharp_logs.close()` sends
 everything and stops.
 
+## Releasing (maintainers)
+
+Published to PyPI as [`zharp-logs`](https://pypi.org/project/zharp-logs/).
+
+### Each release
+
+1. Bump `__version__` in `src/zharp_logs/_version.py` and add the changes to `CHANGELOG.md`.
+2. Run the tests: `python -m unittest discover -s tests`.
+3. Build — with setuptools alone, no extra tools:
+   ```bash
+   rm -rf dist
+   python -c "from setuptools import build_meta as b; b.build_sdist('dist'); b.build_wheel('dist')"
+   ```
+   (or `python -m build`, if the `build` package is installed).
+4. Upload: `python -m twine upload dist/*`. It's installable with `pip install zharp-logs` a minute
+   later.
+5. Tag it: `git tag -a v0.1.1 -m "0.1.1" && git push origin v0.1.1`.
+
+### One-time setup on a new machine
+
+1. `pip install twine`.
+2. On [pypi.org](https://pypi.org) → **Account settings** → **API tokens**, create a token (once the
+   project exists, scope it to `zharp-logs`).
+3. Save it in `~/.pypirc` — outside this repo, never committed:
+   ```ini
+   [pypi]
+   username = __token__
+   password = pypi-…
+   ```
+
 ## License
 
 MIT © [Zharp](https://zharp.io)
