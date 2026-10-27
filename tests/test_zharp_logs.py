@@ -264,6 +264,31 @@ class ZharpLogsTest(unittest.TestCase):
         self.assertTrue(transport.send([{}]))
         self.assertEqual(len(self.fake.bodies), 1)
 
+    def test_a_refused_key_stops_sending_for_an_hour_then_tries_again(self):
+        transport = _transport.Transport("k", _transport.normalize_endpoint(self.fake.endpoint), retry_delay=0.001)
+        now = [1000.0]
+        transport.clock = lambda: now[0]
+        self.fake.status = 401
+        self.assertTrue(transport.send([{}]))
+        self.assertEqual(len(self.fake.bodies), 1)
+        # Backed off: dropped without a request.
+        transport.send([{}])
+        transport.send([{}])
+        self.assertEqual(len(self.fake.bodies), 1)
+        # An hour on, one body tries again; still refused, the wait starts over.
+        now[0] += _transport.REJECTED_BACKOFF
+        self.fake.status = 403
+        transport.send([{}])
+        self.assertEqual(len(self.fake.bodies), 2)
+        self.assertTrue(transport.backed_off())
+        # Accepted again: sending resumes.
+        now[0] += _transport.REJECTED_BACKOFF
+        self.fake.status = 201
+        transport.send([{}])
+        transport.send([{}])
+        self.assertEqual(len(self.fake.bodies), 4)
+        self.assertFalse(transport.backed_off())
+
     def test_bodies_are_cut_by_size_and_a_large_entry_goes_alone(self):
         entries = [{"m": "x" * 40} for _ in range(3)] + [{"m": "y" * 500}]
         bodies = _transport.split_by_size(entries, 120)
