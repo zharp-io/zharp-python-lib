@@ -1,11 +1,13 @@
 """Sends batches of log entries to ``{endpoint}/agent/logs`` as ``{"logs": [...]}``."""
 
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List
 
+from ._env import announce
 from ._version import SDK_NAME
 
 DEFAULT_ENDPOINT = "https://api.zharp.io/api/v1"
@@ -16,6 +18,10 @@ DEFAULT_ENDPOINT = "https://api.zharp.io/api/v1"
 MAX_REQUEST_BYTES = 1_000_000
 
 _TIMEOUT_SECONDS = 15
+
+#: Seconds sending stops once Zharp refuses the API key (401/403). One body is tried again after
+#: it; while the key is still refused the wait starts over.
+REJECTED_BACKOFF = 3600.0
 
 
 def normalize_endpoint(endpoint: Any) -> str:
@@ -30,12 +36,21 @@ class Transport:
         self.url = endpoint + "/agent/logs"
         #: The first retry waits twice this, the second four times.
         self.retry_delay = retry_delay
+        # A refused key stops sending until _retry_at, with one warning — not every batch sent to a
+        # dead key, forever. clock is time.monotonic, replaceable in tests.
+        self._lock = threading.Lock()
+        self._rejected = False
+        self._retry_at = 0.0
+        self.clock = time.monotonic
 
     def send(self, entries: List[Dict[str, Any]]) -> bool:
         """Send entries, split into bodies by size. Returns whether every body was taken or refused
         for good (a 4xx) — False when the network or the server failed throughout."""
         delivered = True
         for body in split_by_size(entries, MAX_REQUEST_BYTES):
+            # While the key is refused, entries are dropped: nothing queues up in memory.
+            if self.backed_off():
+                return True
             if not self._send_body(body):
                 delivered = False
         return delivered
@@ -45,7 +60,13 @@ class Transport:
         fixed by sending the same thing again."""
         for attempt in range(3):
             try:
-                if self.post(body) < 500:
+                status = self.post(body)
+                if status in (401, 403):
+                    self._refused(status)
+                    return True
+                if status < 500:
+                    if status < 300:
+                        self._accepted()
                     return True
             except Exception:
                 # Network failure or timeout — fall through to retry.
@@ -53,6 +74,25 @@ class Transport:
             if attempt < 2:
                 time.sleep(self.retry_delay * (2 << attempt))
         return False
+
+    def backed_off(self) -> bool:
+        """Whether sending is stopped because Zharp refused the key; once the wait is over, one body
+        goes through to try again."""
+        with self._lock:
+            return self._rejected and self.clock() < self._retry_at
+
+    def _refused(self, status: int) -> None:
+        with self._lock:
+            if not self._rejected:
+                announce(f"Zharp rejected this API key (HTTP {status}) — logs are not being sent. Check ZHARP_API_KEY.")
+            self._rejected = True
+            self._retry_at = self.clock() + REJECTED_BACKOFF
+
+    def _accepted(self) -> None:
+        with self._lock:
+            if self._rejected:
+                self._rejected = False
+                announce("Zharp accepted the API key again — logs are being sent.")
 
     def post(self, body: bytes) -> int:
         """One POST; returns the status code."""
