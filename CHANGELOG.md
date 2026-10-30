@@ -10,4 +10,6 @@
 - Errors: escaped request exceptions (handled=false, reported once), uncaught exceptions in the main
   thread and other threads, `zharp.capture_error` (handled=true).
 - `zharp.set_tag`, `zharp.start_span`, `zharp.flush`, `zharp.shutdown`.
+- `tracing=False` / `ZHARP_TRACING=false`: logs only (logs, errors, user and tags; no spans, no
+  client or database instrumentation, nothing injected into outgoing requests).
 - Replaces the logs-only `zharp-logs` package (0.1.x), which stays on PyPI unchanged.

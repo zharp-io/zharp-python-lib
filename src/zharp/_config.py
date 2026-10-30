@@ -24,6 +24,8 @@ class Options:
     logging_level: Optional[int]
     capture_uncaught: bool
     instrument: bool
+    #: False: logs only — no spans, no client/database instrumentation, nothing injected.
+    tracing: bool = True
 
 
 def env_value(name: str) -> Optional[str]:
@@ -109,6 +111,7 @@ def resolve(
     logging_level,
     capture_uncaught: bool,
     instrument: bool,
+    tracing: Optional[bool] = None,
 ) -> Optional[Options]:
     """The options, explicit values first, then ``ZHARP_*``. None when there is no key."""
     resolved_key = pick(key, env_value("ZHARP_KEY"), env_value("ZHARP_API_KEY"))
@@ -133,7 +136,15 @@ def resolve(
         logging_level=logging_level_of(logging_level),
         capture_uncaught=capture_uncaught,
         instrument=instrument,
+        tracing=tracing_of(tracing),
     )
+
+
+def tracing_of(value: Optional[bool]) -> bool:
+    """``tracing=`` when passed, then ``ZHARP_TRACING``; on by default."""
+    if value is not None:
+        return bool(value)
+    return flag_of(env_value("ZHARP_TRACING")) is not False
 
 
 def announce(message: str) -> None:

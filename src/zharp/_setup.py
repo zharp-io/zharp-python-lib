@@ -36,7 +36,10 @@ class State:
         self.tracer_provider = tracer_provider
         self.logger_provider = logger_provider
         self.handler = handler
-        self.tracer = tracer_provider.get_tracer("zharp", __version__)
+        # Logs only: no provider, and zharp.start_span() runs its work without a span.
+        self.tracer = (
+            tracer_provider.get_tracer("zharp", __version__) if tracer_provider is not None else trace.NoOpTracer()
+        )
         self.logger = logger_provider.get_logger("zharp", __version__)
         self.instrumented: List[str] = []
 
@@ -77,16 +80,19 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
     span_exporter, log_exporter = exporters or default_exporters(options)
     resource = resource_for(options)
 
-    tracer_provider = _tracer_provider(resource, options)
-    tracer_provider.add_span_processor(ContextSpanProcessor())
-    tracer_provider.add_span_processor(_span_processor(span_exporter, batch))
+    tracer_provider = None
+    if options.tracing:
+        tracer_provider = _tracer_provider(resource, options)
+        tracer_provider.add_span_processor(ContextSpanProcessor())
+        tracer_provider.add_span_processor(_span_processor(span_exporter, batch))
 
     logger_provider = _logger_provider(resource)
     logger_provider.add_log_record_processor(ContextLogProcessor())
     logger_provider.add_log_record_processor(_log_processor(log_exporter, batch))
 
     propagate.set_global_textmap(CompositePropagator([TraceContextTextMapPropagator(), W3CBaggagePropagator()]))
-    _errors.patch_record_exception()
+    if options.tracing:
+        _errors.patch_record_exception()
     _quiet_repeated_export_errors()
 
     handler = None
@@ -95,7 +101,7 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
 
     state = State(options, tracer_provider, logger_provider, handler)
     if options.instrument:
-        state.instrumented = instrument_installed()
+        state.instrumented = instrument_installed() if options.tracing else instrument_logs_only()
     return state
 
 
@@ -260,6 +266,35 @@ def instrument_installed() -> List[str]:
     return done
 
 
+#: Logs only: the web frameworks, with a no-op tracer. They still read the incoming ``traceparent``
+#: and ``baggage`` (the request's trace id, user and session go on its logs), but no span is
+#: recorded, and HTTP clients and databases are left alone, so nothing is injected downstream.
+_LOGS_ONLY = ("django", "fastapi", "flask")
+
+
+def instrument_logs_only() -> List[str]:
+    done = []
+    noop = trace.NoOpTracerProvider()
+    for name, library, module, cls in INSTRUMENTATIONS:
+        if name not in _LOGS_ONLY:
+            continue
+        try:
+            if importlib.util.find_spec(library) is None:
+                continue
+            kwargs = dict(_INSTRUMENT_OPTIONS.get(name, {}), tracer_provider=noop)
+            if name == "django" and not _django_settings_ready():
+                _instrument_django_at_setup(module, cls, kwargs)
+                done.append(name)
+                continue
+            instrumentor = getattr(importlib.import_module(module), cls)()
+            if not instrumentor.is_instrumented_by_opentelemetry:
+                instrumentor.instrument(**kwargs)
+            done.append(name)
+        except Exception as error:
+            _log.debug("Zharp: not instrumenting %s: %s", name, error)
+    return done
+
+
 def _django_settings_ready() -> bool:
     if os.environ.get("DJANGO_SETTINGS_MODULE"):
         return True
@@ -271,7 +306,7 @@ def _django_settings_ready() -> bool:
         return False
 
 
-def _instrument_django_at_setup(module: str, cls: str) -> None:
+def _instrument_django_at_setup(module: str, cls: str, kwargs: Optional[dict] = None) -> None:
     """``zharp.init()`` at the top of manage.py runs before DJANGO_SETTINGS_MODULE is set, and the
     Django instrumentor would configure empty settings. Instrument as django.setup() starts."""
     import django
@@ -285,7 +320,7 @@ def _instrument_django_at_setup(module: str, cls: str) -> None:
         try:
             instrumentor = getattr(importlib.import_module(module), cls)()
             if not instrumentor.is_instrumented_by_opentelemetry:
-                instrumentor.instrument()
+                instrumentor.instrument(**(kwargs or {}))
         except Exception as error:
             _log.debug("Zharp: not instrumenting django: %s", error)
         return original(*args, **kwargs)
@@ -297,7 +332,8 @@ def _instrument_django_at_setup(module: str, cls: str) -> None:
 def describe(options: Options, instrumented: List[str]) -> str:
     env = 'environment "{}"'.format(options.environment) if options.environment else "no environment set"
     what = ", ".join(instrumented) if instrumented else "no supported libraries found"
-    return 'Application Monitoring active — service "{}", {} ({})'.format(options.service, env, what)
+    mode = "Application Monitoring active" if options.tracing else "Application Monitoring active, logs only"
+    return '{} — service "{}", {} ({})'.format(mode, options.service, env, what)
 
 
 def announce_started(state: State) -> None:

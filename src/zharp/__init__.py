@@ -56,6 +56,7 @@ def init(
     logging_level: Union[str, int, bool, None] = "env",
     capture_uncaught: bool = True,
     instrument: bool = True,
+    tracing: Optional[bool] = None,
     quiet: bool = False,
     _exporters=None,
     _batch: bool = True,
@@ -65,7 +66,8 @@ def init(
 
     Anything not passed is read from the environment: ``ZHARP_KEY``, ``ZHARP_SERVICE`` (then
     ``OTEL_SERVICE_NAME``), ``ZHARP_ENVIRONMENT``, ``ZHARP_RELEASE``, ``ZHARP_ENDPOINT``,
-    ``ZHARP_SAMPLE_RATE``, ``ZHARP_LOGGING_LEVEL``. ``ZHARP_DISABLED=true`` turns it off.
+    ``ZHARP_SAMPLE_RATE``, ``ZHARP_LOGGING_LEVEL``, ``ZHARP_TRACING``. ``ZHARP_DISABLED=true`` turns
+    it off.
 
     :param sample_rate: share of traces kept, 0.0–1.0 (default 1.0). Logs and handled errors are
         always sent.
@@ -73,6 +75,10 @@ def init(
         leaves ``logging`` alone.
     :param capture_uncaught: report exceptions that end the program or a thread.
     :param instrument: instrument the supported libraries that are installed.
+    :param tracing: ``False`` for logs only: logs, errors, user and tags are sent, no spans are
+        recorded, HTTP clients and databases aren't instrumented and nothing is injected into
+        outgoing requests. Logs in a request still carry its incoming trace id. Default ``True``
+        (``ZHARP_TRACING=false`` in the environment).
 
     Returns True when it started. Never raises.
     """
@@ -84,7 +90,8 @@ def init(
             if _config.disabled_by_env():
                 return False
             options = _config.resolve(
-                key, service, environment, release, endpoint, sample_rate, logging_level, capture_uncaught, instrument
+                key, service, environment, release, endpoint, sample_rate, logging_level, capture_uncaught, instrument,
+                tracing,
             )
             if options is None:
                 if not quiet:
@@ -245,7 +252,7 @@ def _span(name: str, attributes: Optional[Mapping[str, Any]]) -> Iterator[Any]:
 def start_span(name: str, fn: Optional[Callable[[], T]] = None, attributes: Optional[Mapping[str, Any]] = None):
     """A span around some work: ``with zharp.start_span("render invoice"):`` or
     ``zharp.start_span("render invoice", lambda: render(invoice))``. An exception that escapes is
-    recorded on the span and re-raised."""
+    recorded on the span and re-raised. With ``tracing=False`` the work runs without a span."""
     if fn is None:
         return _span(name, attributes)
     with _span(name, attributes):
@@ -264,6 +271,8 @@ def flush(timeout: float = 5.0) -> bool:
     millis = int(timeout * 1000)
     ok = True
     for provider in (state.tracer_provider, state.logger_provider):
+        if provider is None:
+            continue
         try:
             ok = bool(provider.force_flush(millis)) and ok
         except Exception:
@@ -279,6 +288,8 @@ def shutdown() -> None:
     if state is None:
         return
     for provider in (state.tracer_provider, state.logger_provider):
+        if provider is None:
+            continue
         try:
             provider.shutdown()
         except Exception:

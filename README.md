@@ -73,6 +73,20 @@ except PaymentError as e:
 `logger.exception(...)` reports too. Each exception is reported once, even when both the
 instrumentation and the framework's logger see it.
 
+## Logs only
+
+To send logs and errors without tracing:
+
+```python
+zharp.init(key="zpk_…", service="checkout-api", tracing=False)   # or ZHARP_TRACING=false
+```
+
+Logs (`zharp.log.*` and `logging`), errors (uncaught and `capture_error`), the user, session and
+tags still go out. No spans are recorded or sent, HTTP clients and databases aren't instrumented,
+and no `traceparent`/`baggage` is added to outgoing requests. Django, FastAPI and Flask are hooked
+with a no-op tracer only to read the incoming `traceparent` and `baggage`, so a request's logs still
+carry the caller's trace id, user and session. `zharp.start_span()` runs its work without a span.
+
 ## More
 
 ```python
@@ -93,6 +107,7 @@ zharp.flush()                                       # send now: end of a job or 
 | `logging_level` | `ZHARP_LOGGING_LEVEL` | `INFO` |
 | `capture_uncaught` | — | `True` |
 | `instrument` | — | `True` |
+| `tracing` | `ZHARP_TRACING` | `True` (`False`: logs only) |
 
 Telemetry is batched and sent every 5 seconds from a background thread, gzip-compressed, and
 whatever is left goes when the program exits. `init()` never raises.
