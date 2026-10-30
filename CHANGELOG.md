@@ -1,13 +1,13 @@
 # Changelog
 
-## 0.1.1
+## 0.1.0 (`zharp`)
 
-- A rejected API key (HTTP 401/403) stops sending for an hour with one warning, instead of every batch going to a dead key; sending resumes, with a notice, once the key is accepted again.
-
-## 0.1.0
-
-- First release: `zharp_logs.init()` and `debug`/`info`/`warn`/`error`/`fatal`, from code or `ZHARP_*` environment variables.
-- Caught exceptions carry their type and full traceback automatically; `zharp_logs.exception()` inside `except`.
-- `ZharpHandler` for Python's `logging`, or `capture_logging` to attach it to the root logger.
-- Uncaught exceptions sent (main thread and others), then handled as before.
-- Background sending, batches, retries; everything left sent at exit; safe across forks.
+- First release of `zharp`, Zharp Application Monitoring on OpenTelemetry: `zharp.init()` configures
+  the OTel SDK (OTLP/HTTP exporters with gzip, resource, W3C tracecontext + baggage) and instruments
+  Django, FastAPI, Flask, requests, httpx, psycopg, psycopg2 and SQLAlchemy when installed.
+- `logging` bridged with trace context; `zharp.log.*`.
+- `enduser.id` / `session.id` copied from incoming baggage onto every span and log; `zharp.set_user`.
+- Errors: escaped request exceptions (handled=false, reported once), uncaught exceptions in the main
+  thread and other threads, `zharp.capture_error` (handled=true).
+- `zharp.set_tag`, `zharp.start_span`, `zharp.flush`, `zharp.shutdown`.
+- Replaces the logs-only `zharp-logs` package (0.1.x), which stays on PyPI unchanged.

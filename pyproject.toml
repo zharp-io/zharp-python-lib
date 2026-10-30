@@ -3,24 +3,44 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "zharp-logs"
+name = "zharp"
 dynamic = ["version"]
-description = "Send your Python app's logs and uncaught exceptions to Zharp. No dependencies."
+description = "Zharp Application Monitoring for Python: traces, logs and errors from Django, FastAPI and Flask, on OpenTelemetry."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Zharp", email = "support@zharp.io" }]
-requires-python = ">=3.8"
-keywords = ["logging", "logs", "observability", "monitoring", "zharp"]
+requires-python = ">=3.9"
+keywords = ["apm", "tracing", "opentelemetry", "logging", "errors", "observability", "monitoring", "zharp"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
+    "Framework :: Django",
+    "Framework :: FastAPI",
+    "Framework :: Flask",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: System :: Logging",
     "Topic :: System :: Monitoring",
     "Typing :: Typed",
+]
+# The instrumentation packages don't install the frameworks they instrument; init() instruments
+# the ones the app has.
+dependencies = [
+    "opentelemetry-api>=1.39,<2",
+    "opentelemetry-sdk>=1.39,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.39,<2",
+    "opentelemetry-instrumentation>=0.60b0",
+    "opentelemetry-instrumentation-logging>=0.60b0",
+    "opentelemetry-instrumentation-django>=0.60b0",
+    "opentelemetry-instrumentation-fastapi>=0.60b0",
+    "opentelemetry-instrumentation-flask>=0.60b0",
+    "opentelemetry-instrumentation-requests>=0.60b0",
+    "opentelemetry-instrumentation-httpx>=0.60b0",
+    "opentelemetry-instrumentation-psycopg>=0.60b0",
+    "opentelemetry-instrumentation-psycopg2>=0.60b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.60b0",
 ]
 
 [project.urls]
@@ -29,10 +49,10 @@ Documentation = "https://zharp.io/docs/sdks/python"
 Source = "https://github.com/zharp-io/zharp-python-lib"
 
 [tool.setuptools.dynamic]
-version = { attr = "zharp_logs._version.__version__" }
+version = { attr = "zharp._version.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-zharp_logs = ["py.typed"]
+zharp = ["py.typed"]
