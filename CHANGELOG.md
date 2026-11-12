@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (`zharp`)
 
 - `capture_bodies` (and `ZHARP_CAPTURE_BODIES`): request and response bodies on HTTP spans, off by
   default — `"errors"` (status 400+ or no response) or `"all"`, or `CaptureBodies(mode, max_size,
