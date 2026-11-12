@@ -4,7 +4,9 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
+
+from . import _bodies
 
 DEFAULT_ENDPOINT = "https://api.zharp.io/api/v1/otlp"
 
@@ -26,6 +28,8 @@ class Options:
     instrument: bool
     #: False: logs only — no spans, no client/database instrumentation, nothing injected.
     tracing: bool = True
+    #: ``capture_bodies``: request and response bodies on HTTP spans; None when off.
+    capture_bodies: Any = None
 
 
 def env_value(name: str) -> Optional[str]:
@@ -112,6 +116,7 @@ def resolve(
     capture_uncaught: bool,
     instrument: bool,
     tracing: Optional[bool] = None,
+    capture_bodies: Any = None,
 ) -> Optional[Options]:
     """The options, explicit values first, then ``ZHARP_*``. None when there is no key."""
     resolved_key = pick(key, env_value("ZHARP_KEY"), env_value("ZHARP_API_KEY"))
@@ -137,6 +142,7 @@ def resolve(
         capture_uncaught=capture_uncaught,
         instrument=instrument,
         tracing=tracing_of(tracing),
+        capture_bodies=_bodies.body_settings(capture_bodies, env_value("ZHARP_CAPTURE_BODIES")),
     )
 
 

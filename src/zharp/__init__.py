@@ -23,9 +23,11 @@ from opentelemetry import trace as _trace
 from opentelemetry._logs import LogRecord, SeverityNumber
 
 from . import _config, _context, _errors, _setup
+from ._bodies import CaptureBodies
 from ._version import __version__
 
 __all__ = [
+    "CaptureBodies",
     "__version__",
     "capture_error",
     "clear_user",
@@ -57,6 +59,7 @@ def init(
     capture_uncaught: bool = True,
     instrument: bool = True,
     tracing: Optional[bool] = None,
+    capture_bodies: Union[bool, str, Mapping[str, Any], CaptureBodies, None] = None,
     quiet: bool = False,
     _exporters=None,
     _batch: bool = True,
@@ -79,6 +82,16 @@ def init(
         recorded, HTTP clients and databases aren't instrumented and nothing is injected into
         outgoing requests. Logs in a request still carry its incoming trace id. Default ``True``
         (``ZHARP_TRACING=false`` in the environment).
+    :param capture_bodies: request and response bodies on HTTP spans — incoming requests (Django,
+        Flask, FastAPI) and outgoing calls (requests, httpx). Default off. ``"errors"`` (or
+        ``True``) keeps them for failed requests only (status 400 and above, or no response);
+        ``"all"`` for every request; or a :class:`CaptureBodies` (or dict) with ``mode``,
+        ``max_size``, ``redact_keys`` and ``urls``. ``ZHARP_CAPTURE_BODIES=errors|all`` in the
+        environment. Text is capped at 32 KB; files in uploads, inline images and binary bodies
+        are described (name, type, size), never sent. Field names are kept; values under
+        secret-looking keys (``password``, ``token``, ``authorization``, ``card`` …) become
+        ``[Filtered]`` before anything is sent. Secret-looking query values in URLs are masked on
+        every span either way.
 
     Returns True when it started. Never raises.
     """
@@ -91,7 +104,7 @@ def init(
                 return False
             options = _config.resolve(
                 key, service, environment, release, endpoint, sample_rate, logging_level, capture_uncaught, instrument,
-                tracing,
+                tracing, capture_bodies,
             )
             if options is None:
                 if not quiet:

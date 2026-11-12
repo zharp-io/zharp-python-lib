@@ -22,7 +22,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-from . import _errors
+from . import _capture, _errors
 from ._config import Options, announce
 from ._context import ContextLogProcessor, ContextSpanProcessor
 from ._version import __version__
@@ -84,6 +84,7 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
     if options.tracing:
         tracer_provider = _tracer_provider(resource, options)
         tracer_provider.add_span_processor(ContextSpanProcessor())
+        tracer_provider.add_span_processor(_capture.UrlRedactionSpanProcessor())
         tracer_provider.add_span_processor(_span_processor(span_exporter, batch))
 
     logger_provider = _logger_provider(resource)
@@ -101,7 +102,7 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
 
     state = State(options, tracer_provider, logger_provider, handler)
     if options.instrument:
-        state.instrumented = instrument_installed() if options.tracing else instrument_logs_only()
+        state.instrumented = instrument_installed(options.capture_bodies) if options.tracing else instrument_logs_only()
     return state
 
 
@@ -246,20 +247,22 @@ INSTRUMENTATIONS = [
 _INSTRUMENT_OPTIONS = {"fastapi": {"exclude_spans": ["receive", "send"]}}
 
 
-def instrument_installed() -> List[str]:
-    """Instrument every supported library that is installed. Returns their names."""
+def instrument_installed(capture_bodies=None) -> List[str]:
+    """Instrument every supported library that is installed. Returns their names.
+    ``capture_bodies`` (settings, or None) adds the body hooks."""
     done = []
     for name, library, module, cls in INSTRUMENTATIONS:
         try:
             if importlib.util.find_spec(library) is None:
                 continue
+            kwargs = dict(_INSTRUMENT_OPTIONS.get(name, {}), **_capture.instrument_options(name, capture_bodies))
             if name == "django" and not _django_settings_ready():
-                _instrument_django_at_setup(module, cls)
+                _instrument_django_at_setup(module, cls, kwargs)
                 done.append(name)
                 continue
             instrumentor = getattr(importlib.import_module(module), cls)()
             if not instrumentor.is_instrumented_by_opentelemetry:
-                instrumentor.instrument(**_INSTRUMENT_OPTIONS.get(name, {}))
+                instrumentor.instrument(**kwargs)
             done.append(name)
         except Exception as error:  # a missing instrumentation package or a version it rejects
             _log.debug("Zharp: not instrumenting %s: %s", name, error)
@@ -306,7 +309,7 @@ def _django_settings_ready() -> bool:
         return False
 
 
-def _instrument_django_at_setup(module: str, cls: str, kwargs: Optional[dict] = None) -> None:
+def _instrument_django_at_setup(module: str, cls: str, options: Optional[dict] = None) -> None:
     """``zharp.init()`` at the top of manage.py runs before DJANGO_SETTINGS_MODULE is set, and the
     Django instrumentor would configure empty settings. Instrument as django.setup() starts."""
     import django
@@ -320,7 +323,7 @@ def _instrument_django_at_setup(module: str, cls: str, kwargs: Optional[dict] = 
         try:
             instrumentor = getattr(importlib.import_module(module), cls)()
             if not instrumentor.is_instrumented_by_opentelemetry:
-                instrumentor.instrument(**(kwargs or {}))
+                instrumentor.instrument(**(options or {}))
         except Exception as error:
             _log.debug("Zharp: not instrumenting django: %s", error)
         return original(*args, **kwargs)

@@ -73,6 +73,41 @@ except PaymentError as e:
 `logger.exception(...)` reports too. Each exception is reported once, even when both the
 instrumentation and the framework's logger see it.
 
+## Request and response bodies
+
+Off by default. Turn on `capture_bodies` to see what a request sent and what came back, on its span:
+
+```python
+zharp.init(key="zpk_…", service="checkout-api", capture_bodies="errors")   # failed requests only; "all" for every one
+
+# or ZHARP_CAPTURE_BODIES=errors in the environment, or, with more control:
+from zharp import CaptureBodies
+zharp.init(capture_bodies=CaptureBodies(mode="all", max_size=4096, redact_keys=["date_of_birth"], urls=["api.example.com"]))
+```
+
+- `"errors"` (or `True`) keeps bodies only for requests that answered 400 and above, or got no
+  response. `"all"` keeps every one.
+- Incoming requests in Django (WSGI and ASGI), Flask and FastAPI; outgoing calls with requests and
+  httpx. `urls` (hosts, URL prefixes or compiled regexes) narrows which requests.
+- Text — JSON, forms, XML, plain text — is kept up to 32 KB (`max_size`, up to 128 KB); gzip and
+  deflate bodies are inflated first. Every field name is kept. A file in an upload shows as
+  `[file photo.png · image/png · 240 KB]`, an inline image or long base64 value as
+  `[image/png · 24 KB]`, a body that isn't text as `[binary · application/pdf · 1.2 MB]` or
+  `[event stream]`. File contents are never sent.
+- Your app reads and writes its bodies exactly as before; the SDK keeps a copy of what passes, up to
+  the limit. A body the app never read (a request it refused) is read after it has answered.
+- A response your code streams (`requests(..., stream=True)`, every httpx response) is read after its
+  span has ended, so it shows as `[stream · application/json · 60 B]` rather than its text.
+
+Values under keys that look secret — `password`, `pwd`, `token`, `secret`, `apiKey`,
+`authorization`, `cookie`, `card`, `cvv`, `ssn` and similar — become `[Filtered]` in your process,
+before anything is sent; the field stays, only its value is hidden (under a secret object such as
+`card`, each value inside is hidden and its keys kept). Anything else, such as names and email
+addresses, is sent as it is: add those keys to `redact_keys`.
+
+Whether or not bodies are on, secret-looking values in URL query strings (`?token=`, `key`, `sig`,
+`session`, `password` …) are recorded as `[Filtered]` on every span.
+
 ## Logs only
 
 To send logs and errors without tracing:
@@ -115,7 +150,7 @@ whatever is left goes when the program exits. `init()` never raises.
 ## Development
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -e . flask fastapi httpx uvicorn
+python -m venv .venv && .venv/bin/pip install -e . flask fastapi httpx requests django uvicorn
 .venv/bin/python -m unittest discover -s tests
 ```
 
