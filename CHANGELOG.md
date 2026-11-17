@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (`zharp`) — 2026-11-17
+
+**Behaviour change:** what the app logs and prints is no longer sent unless `logs=True` / `ZHARP_LOGS=true`. Where the Zharp agent reads the app's output it brings those lines in, linked by the `trace_id=… span_id=…` stamp; turn `logs` on where there is no agent. Errors, traces and `zharp.log` are sent as before.
 
 - **Logs are off by default** (`logs=False`, `ZHARP_LOGS`): on a server the Zharp agent reads the
   app's output and brings its logs in; the SDK sending them too made every line arrive twice. With
