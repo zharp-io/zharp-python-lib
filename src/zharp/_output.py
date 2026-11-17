@@ -32,6 +32,7 @@ import time
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from opentelemetry import context as otel_context
+from opentelemetry import trace
 from opentelemetry._logs import LogRecord, SeverityNumber
 from opentelemetry.sdk._logs import LogRecordProcessor
 
@@ -365,11 +366,11 @@ class _Tap:
 
 
 class _Flusher:
-    """One background thread that sends lines left unfinished for longer than FLUSH_SECONDS; it
-    sleeps while nothing is waiting."""
+    """One background thread that deals with lines left unfinished for longer than FLUSH_SECONDS
+    (sends them, or writes out text held back for its stamp); it sleeps while nothing waits."""
 
     def __init__(self) -> None:
-        self.taps: List[_Tap] = []
+        self.parts: List[Any] = []
         self._event = threading.Event()
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
@@ -381,6 +382,7 @@ class _Flusher:
         self._lock = threading.Lock()
         self._event = threading.Event()
         self._thread = None  # started again on the next unfinished line
+
     def wake(self) -> None:
         self._event.set()
         thread = self._thread
@@ -397,41 +399,218 @@ class _Flusher:
             while not self._stopped:
                 time.sleep(FLUSH_SECONDS / 2)
                 waiting = False
-                for tap in self.taps:
-                    waiting = tap.flush(FLUSH_SECONDS) or waiting
+                for part in self.parts:
+                    try:
+                        waiting = part.flush(FLUSH_SECONDS) or waiting
+                    except Exception:
+                        pass
                 if not waiting:
                     break
+
+    def flush_all(self) -> None:
+        for part in self.parts:
+            try:
+                part.flush()
+            except Exception:
+                pass
 
     def stop(self) -> None:
         self._stopped = True
         self._event.set()
 
 
-class _Stream:
-    """Stands in for ``sys.stdout`` / ``sys.stderr``: writes go to the real stream exactly as
-    before, and a copy of each one to the tap. Everything else is the real stream's."""
+# ─── The stamp ──────────────────────────────────────────────────────────────────
 
-    def __init__(self, target, tap: _Tap) -> None:
+
+def current_ids() -> Optional[Tuple[str, str]]:
+    """The active span's trace and span id, as lowercase hex; None outside a request."""
+    try:
+        span_context = trace.get_current_span().get_span_context()
+        if span_context is not None and span_context.is_valid:
+            return format(span_context.trace_id, "032x"), format(span_context.span_id, "016x")
+    except Exception:
+        pass
+    return None
+
+
+def _json_object(text: str) -> bool:
+    try:
+        return isinstance(json.loads(text), dict)
+    except ValueError:
+        return False
+
+
+def stamp_line(line: str, ids: Tuple[str, str]) -> str:
+    """``… trace_id=<32 hex> span_id=<16 hex>`` at the end of a text line; two fields in a JSON
+    record, which stays valid JSON. A blank line, one that already carries a trace_id and the
+    SDK's own ``[Zharp]`` lines are left as they are."""
+    trace_id, span_id = ids
+    cr = "\r" if line.endswith("\r") else ""
+    body = line[:-1] if cr else line
+    trimmed = body.rstrip()
+    if not trimmed.strip() or "trace_id" in body or "[Zharp]" in body:
+        return line
+    tail = body[len(trimmed):]
+    start = len(trimmed) - len(trimmed.lstrip())
+    if trimmed.endswith("}") and trimmed[start:].startswith("{") and _json_object(trimmed[start:]):
+        close = trimmed.rfind("}")
+        inner = trimmed[start + 1 : close].strip()
+        fields = '"trace_id":"{}","span_id":"{}"'.format(trace_id, span_id)
+        return trimmed[:close] + ("," if inner else "") + fields + "}" + tail + cr
+    return "{} trace_id={} span_id={}{}{}".format(trimmed, trace_id, span_id, tail, cr)
+
+
+def stamp_text(text: str, ids: Optional[Tuple[str, str]] = None) -> str:
+    """Every line of ``text`` stamped with ``ids`` (else the active span's)."""
+    ids = ids or current_ids()
+    if ids is None or not isinstance(text, str) or not text:
+        return text
+    return "\n".join(stamp_line(line, ids) for line in text.split("\n"))
+
+
+class _Line:
+    __slots__ = ("held", "written", "since")
+
+    def __init__(self) -> None:
+        self.held = ""  # not written yet: the rest of a line printed in a request, kept for its stamp
+        self.written = ""  # the part of the current line already written
+        self.since = 0.0
+
+
+class _Stamper:
+    """Adds the request's ids at the end of each line one stream prints, per thread.
+
+    ``print()`` writes its text and the newline separately, so a piece of a line printed in a
+    request is held back until its newline arrives (or ``flush()``, or FLUSH_SECONDS pass — the
+    stream itself buffers a line that long anyway), then written with the stamp."""
+
+    def __init__(self, target, flusher: _Flusher) -> None:
+        self.target = target
+        self.flusher = flusher
+        self.enabled = True
+        self._lock = threading.RLock()
+        self._lines: Dict[int, _Line] = {}
+
+    def after_fork(self) -> None:
+        self._lock = threading.RLock()
+        self._lines = {}
+
+    def write(self, text: str) -> None:
+        with self._lock:
+            out = self._process(text)
+            if out:
+                self.target.write(out)
+
+    def _process(self, text: str) -> str:
+        ids = current_ids()
+        key = threading.get_ident()
+        line = self._lines.get(key)
+        if line is None:
+            line = self._lines[key] = _Line()
+        data = line.held + text
+        line.held = ""
+        parts = data.split("\n")
+        out = []
+        for segment in parts[:-1]:
+            out.append(self._finish(line.written, segment, ids) + "\n")
+            line.written = ""
+        rest = parts[-1]
+        if rest and ids is not None and len(rest) <= MAX_LINE:
+            line.held = rest
+            line.since = time.monotonic()
+            self.flusher.wake()
+        elif rest:
+            out.append(rest)
+            line.written = (line.written + rest)[:MAX_LINE]
+        if not line.held and not line.written:
+            del self._lines[key]
+        return "".join(out)
+
+    @staticmethod
+    def _finish(written: str, segment: str, ids: Optional[Tuple[str, str]]) -> str:
+        """The end of a line, stamped. Only what isn't written yet can change."""
+        if ids is None:
+            return segment
+        full = written + segment
+        stamped = stamp_line(full, ids)
+        if stamped == full:
+            return segment
+        if stamped.startswith(written):
+            return stamped[len(written):]
+        if full.lstrip().startswith("{"):
+            return segment  # a JSON record whose end was already written: left valid
+        return "{} trace_id={} span_id={}".format(segment, ids[0], ids[1])
+
+    def release(self, key: Optional[int] = None) -> None:
+        """Write out this thread's held text now (the app flushed the stream: a prompt, a progress
+        bar). The start of a JSON record is kept until its newline (or FLUSH_SECONDS) so it can
+        still get its fields — wrappers such as colorama flush after every write."""
+        with self._lock:
+            line = self._lines.get(threading.get_ident() if key is None else key)
+            if key is None and line is not None and line.held.lstrip().startswith("{"):
+                return
+            if line is not None and line.held:
+                held, line.held = line.held, ""
+                line.written = (line.written + held)[:MAX_LINE]
+                self.target.write(held)
+
+    def flush(self, older_than: Optional[float] = None) -> bool:
+        now = time.monotonic()
+        waiting = False
+        with self._lock:
+            for key, line in list(self._lines.items()):
+                if line.held:
+                    if older_than is None or now - line.since >= older_than:
+                        self.release(key)
+                    else:
+                        waiting = True
+        return waiting
+
+
+class _Stream:
+    """Stands in for ``sys.stdout`` / ``sys.stderr``: writes reach the real stream as before (with
+    the request's ids at the end of each line, when stamping), and a copy of each one goes to the
+    tap (when logs are sent). Everything else is the real stream's."""
+
+    def __init__(self, target, tap: Optional[_Tap], stamper: Optional[_Stamper]) -> None:
         object.__setattr__(self, "_zharp_target", target)
         object.__setattr__(self, "_zharp_tap", tap)
+        object.__setattr__(self, "_zharp_stamper", stamper)
 
     def write(self, text):
-        result = self._zharp_target.write(text)
-        try:
-            self._zharp_tap.take(text)
-        except Exception:
-            pass  # a line that could not be copied is not worth an exception in the caller
+        stamper = self._zharp_stamper
+        if stamper is not None and stamper.enabled and isinstance(text, str):
+            try:
+                stamper.write(text)
+                result = len(text)
+            except (OSError, ValueError):
+                raise  # the stream's own errors (closed, broken pipe) reach the caller as before
+            except Exception:
+                result = self._zharp_target.write(text)
+        else:
+            result = self._zharp_target.write(text)
+        tap = self._zharp_tap
+        if tap is not None:
+            try:
+                tap.take(text)
+            except Exception:
+                pass  # a line that could not be copied is not worth an exception in the caller
         return result
 
     def writelines(self, lines):
-        lines = list(lines)
-        result = self._zharp_target.writelines(lines)
-        try:
-            for text in lines:
-                self._zharp_tap.take(text)
-        except Exception:
-            pass
-        return result
+        for text in list(lines):
+            self.write(text)
+
+    def flush(self):
+        stamper = self._zharp_stamper
+        if stamper is not None:
+            try:
+                stamper.release()
+            except (OSError, ValueError):
+                raise
+            except Exception:
+                pass
+        return self._zharp_target.flush()
 
     def __getattr__(self, name):
         return getattr(self._zharp_target, name)
@@ -456,45 +635,52 @@ class _Stream:
 io.TextIOBase.register(_Stream)
 
 
-def capture_output(logger) -> Callable[[], None]:
-    """Tap ``sys.stdout`` and ``sys.stderr``. Returns the undo, which sends any unfinished line."""
+def wrap_streams(logger=None, stamp: bool = False) -> Tuple[Callable[[], None], Dict[Any, Any]]:
+    """Stand in for ``sys.stdout`` and ``sys.stderr``: ``stamp`` adds the request's ids to each
+    line; a ``logger`` sends each line as a log (the output capture). Returns the undo (which
+    finishes any unfinished line) and {original stream: stand-in}."""
     flusher = _Flusher()
     undo: List[Callable[[], None]] = []
+    replaced: Dict[Any, Any] = {}
+    if logger is None and not stamp:
+        return (lambda: None), replaced
 
     for name, fallback in (("stdout", INFO), ("stderr", WARN)):
         stream = getattr(sys, name, None)
         if stream is None or isinstance(stream, _Stream) or not callable(getattr(stream, "write", None)):
             continue
-        tap = _Tap(name, fallback, logger, flusher)
-        flusher.taps.append(tap)
-        if hasattr(os, "register_at_fork"):
-            os.register_at_fork(after_in_child=tap.after_fork)
-        proxy = _Stream(stream, tap)
+        tap = _Tap(name, fallback, logger, flusher) if logger is not None else None
+        stamper = _Stamper(stream, flusher) if stamp else None
+        for part in (stamper, tap):  # held text is written before its line is sent
+            if part is not None:
+                flusher.parts.append(part)
+                if hasattr(os, "register_at_fork"):
+                    os.register_at_fork(after_in_child=part.after_fork)
+        proxy = _Stream(stream, tap, stamper)
         setattr(sys, name, proxy)
+        replaced[stream] = proxy
 
-        def restore(name=name, stream=stream, proxy=proxy, tap=tap) -> None:
-            tap.flush()
-            tap.enabled = False  # if the app replaced or wrapped it since, it now just passes through
+        def restore(name=name, stream=stream, proxy=proxy, tap=tap, stamper=stamper) -> None:
+            for part in (stamper, tap):
+                if part is not None:
+                    part.flush()
+                    part.enabled = False  # if the app wrapped the stand-in since, it now passes through
             if getattr(sys, name, None) is proxy:
                 setattr(sys, name, stream)
 
         undo.append(restore)
 
-    def flush_at_exit() -> None:
-        for tap in flusher.taps:
-            tap.flush()
-
     # Runs before the logger provider's own exit hook (registered earlier), so the last unfinished
-    # line is still sent.
-    atexit.register(flush_at_exit)
+    # line is still written and sent.
+    atexit.register(flusher.flush_all)
 
     def stop() -> None:
         flusher.stop()
-        atexit.unregister(flush_at_exit)
+        atexit.unregister(flusher.flush_all)
         for fn in undo:
             try:
                 fn()
             except Exception:
                 pass
 
-    return stop
+    return stop, replaced

@@ -39,6 +39,7 @@ def main():
     started = zharp.init(
         key="zpk_test",
         service="logs-only-test",
+        logs=True,
         quiet=True,
         _exporters=(SPANS, LOGS),
         _batch=False,

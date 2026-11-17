@@ -27,9 +27,12 @@ ESC = "\x1b"
 
 
 def main(out_path):
+    # Each switch as an argument when the test asks for one (else the ZHARP_* environment decides).
     options = {}
-    if os.environ.get("CAPTURE_OUTPUT_ARG") == "false":
-        options["capture_output"] = False
+    for name in ("capture_output", "logs", "log_correlation"):
+        value = os.environ.get("ARG_" + name.upper())
+        if value is not None:
+            options[name] = value == "true"
     zharp.init(key="zpk_test", service="output-test", quiet=True, _exporters=(SPANS, LOGS), _batch=False, **options)
 
     import flask
@@ -66,6 +69,10 @@ def main(out_path):
 
     app = flask.Flask("output_app")
 
+    @app.route("/boom")
+    def boom():
+        raise ValueError("uncaught-marker")
+
     @app.route("/orders")
     def orders():
         print("print-marker hello")
@@ -88,6 +95,16 @@ def main(out_path):
         slog.info("structlog-marker placed", order_id=7)
         std_slog.warning("structlog-std-marker")
         zharp.log.info("zharp-log-marker")
+        print("[Zharp] sdk-marker own line")
+        print("has-id-marker trace_id=0123 already")
+        try:
+            raise KeyError("exception-marker")
+        except KeyError:
+            shop.exception("exception-logged-marker failed")
+        try:
+            raise LookupError("captured-marker")
+        except LookupError as error:
+            zharp.capture_error(error)
         # Another thread (given the request's context) printing a line in pieces: on the terminal
         # the two threads' writes interleave; the lines sent don't mix.
         piece = threading.Event()
@@ -107,6 +124,7 @@ def main(out_path):
 
     headers = {"traceparent": "00-5bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}
     status = app.test_client().get("/orders", headers=headers).status_code
+    app.test_client().get("/boom", headers=headers)
 
     # loguru printing from its queue thread, after the record was sent: not sent again.
     queued = loguru_logger.add(sys.stdout, enqueue=True, format="{message}")
@@ -114,7 +132,10 @@ def main(out_path):
     loguru_logger.complete()
     loguru_logger.remove(queued)
 
-    # Outside any request, a line still unfinished when the flush timer fires.
+    # Outside any request: printed as they are, never stamped.
+    print("outer-print-line plain")
+    print(json.dumps({"msg": "outer-json-line"}))
+    # A line still unfinished when the flush timer fires.
     sys.stdout.write("outside-marker no newline")
     sys.stdout.flush()
     time.sleep(0.5)
@@ -139,6 +160,13 @@ def main(out_path):
         json.dump(
             {
                 "status": status,
+                # Errors reported on spans (an exception that escapes a request).
+                "span_errors": [
+                    str(event.attributes.get("exception.message"))
+                    for span in SPANS.get_finished_spans()
+                    for event in span.events
+                    if event.name == "exception"
+                ],
                 "logs": logs,
                 # Put back, or (when something wrapped it since, like colorama on Windows) passing
                 # through untouched.

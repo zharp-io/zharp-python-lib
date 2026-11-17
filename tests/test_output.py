@@ -1,5 +1,10 @@
-"""capture_output and the exact log captures: every line the app prints or logs arrives, once, at
-its level, in the request it was written in — and the app still prints all of it.
+"""What the app logs and prints.
+
+- logs=True: every line arrives, once, at its level, in the request it was written in (the exact
+  captures and capture_output) — and the app still prints all of it.
+- By default (logs off) none of it is sent; errors, traces and zharp.log still are.
+- log_correlation (on by default): each line printed in a request ends with its trace and span id
+  (fields in a JSON line), for the Zharp agent that reads the output.
 
 Runs output_app.py in a subprocess (it replaces sys.stdout/sys.stderr and sets OpenTelemetry's
 global providers, once per process). Needs flask, loguru and structlog installed.
@@ -7,6 +12,7 @@ global providers, once per process). Needs flask, loguru and structlog installed
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -48,13 +54,18 @@ LOGGED = (
 )
 
 
-def run(env_capture=None, arg_capture=None):
-    env = {k: v for k, v in os.environ.items() if not k.startswith("ZHARP_")}
-    env["PYTHONIOENCODING"] = "utf-8"
-    if env_capture is not None:
-        env["ZHARP_CAPTURE_OUTPUT"] = env_capture
-    if arg_capture is not None:
-        env["CAPTURE_OUTPUT_ARG"] = arg_capture
+#: What the Zharp backend reads from the end of a line the agent collected.
+STAMP = re.compile(r"\s*\btrace_id=([0-9a-f]{32})\s+span_id=([0-9a-f]{16})\s*$", re.IGNORECASE)
+
+
+def run(env=None, **args):
+    """output_app.py, with ``ZHARP_*`` from ``env`` and init() arguments (``logs=True`` …)."""
+    child = {k: v for k, v in os.environ.items() if not k.startswith("ZHARP_")}
+    child["PYTHONIOENCODING"] = "utf-8"
+    child.update(env or {})
+    for name, value in args.items():
+        child["ARG_" + name.upper()] = "true" if value else "false"
+    env = child
     fd, path = tempfile.mkstemp(suffix=".json")
     os.close(fd)
     try:
@@ -75,10 +86,18 @@ def matching(result, text):
     return [log for log in result["logs"] if text in log["body"]]
 
 
+def errors_with(result, message):
+    """Errors as Zharp reads them: logs carrying exception.*, and exception events on spans."""
+    logged = [log for log in result["logs"] if message in str(log["attributes"].get("exception.message", ""))]
+    return logged + [{"trace_id": TRACE_ID} for text in result["span_errors"] if message in text]
+
+
 class OutputCaptureTest(unittest.TestCase):
+    """logs=True: everything you built last round."""
+
     @classmethod
     def setUpClass(cls):
-        cls.result = run()
+        cls.result = run(logs=True)
 
     def one(self, text):
         found = matching(self.result, text)
@@ -131,6 +150,14 @@ class OutputCaptureTest(unittest.TestCase):
         self.assertEqual(self.one("ansi-marker")["body"], "ansi-marker red")
         self.assertFalse([log for log in self.result["logs"] if "\x1b" in log["body"]])
 
+    def test_bodies_sent_do_not_carry_the_stamp(self):
+        stamped = [log["body"] for log in self.result["logs"] if "trace_id=" in log["body"]]
+        self.assertEqual(stamped, ["has-id-marker trace_id=0123 already"])
+
+    def test_errors_are_sent_once(self):
+        for text in ("exception-marker", "captured-marker", "uncaught-marker"):
+            self.assertEqual(len(errors_with(self.result, text)), 1, text)
+
     def test_fields_are_kept(self):
         self.assertEqual(self.one("structlog-marker")["attributes"]["order_id"], 7)
         self.assertEqual(self.one("structlog-marker")["body"], "structlog-marker placed")
@@ -160,10 +187,15 @@ class OutputCaptureTest(unittest.TestCase):
         self.assertFalse(self.result["tap_left_on"])
 
     def test_turned_off_by_env(self):
-        self.check_off(run(env_capture="false"))
+        self.check_off(run({"ZHARP_CAPTURE_OUTPUT": "false"}, logs=True))
 
     def test_turned_off_by_argument(self):
-        self.check_off(run(arg_capture="false"))
+        self.check_off(run(logs=True, capture_output=False))
+
+    def test_logs_turned_on_by_env(self):
+        result = run({"ZHARP_LOGS": "true"})
+        for text in ("print-marker hello", "logging-marker once", "loguru-marker once", "structlog-marker"):
+            self.assertEqual(len(matching(result, text)), 1, text)
 
     def check_off(self, result):
         for text in PRINTED:
@@ -171,6 +203,117 @@ class OutputCaptureTest(unittest.TestCase):
         for text in LOGGED:
             self.assertEqual(len(matching(result, text)), 1, text)
         self.assertIn("print-marker hello", result["stdout"])
+
+
+class LogsOffTest(unittest.TestCase):
+    """The default: what the app logs and prints is not sent; errors, traces and zharp.log are."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.result = run()
+
+    def test_nothing_printed_or_logged_is_sent(self):
+        for text in PRINTED + LOGGED + ("loguru-queued-marker", "outside-marker", "unfinished-marker", "has-id-marker"):
+            if text == "zharp-log-marker":
+                continue
+            self.assertFalse(matching(self.result, text), text)
+        sources = {log["attributes"].get("log.source") for log in self.result["logs"]}
+        self.assertFalse(sources & {"stdout", "stderr", "loguru", "structlog"}, sources)
+
+    def test_errors_and_zharp_log_are_still_sent(self):
+        self.assertEqual(len(matching(self.result, "zharp-log-marker")), 1)
+        for text in ("exception-marker", "captured-marker", "uncaught-marker"):
+            errors = errors_with(self.result, text)
+            self.assertEqual(len(errors), 1, text)
+            self.assertEqual(errors[0]["trace_id"], TRACE_ID, text)
+        bodies = [log["body"] for log in self.result["logs"]]
+        self.assertTrue(all("exception.type" in log["attributes"] or log["body"] == "zharp-log-marker" for log in self.result["logs"]), bodies)
+
+    def test_the_argument_wins_over_the_environment(self):
+        result = run({"ZHARP_LOGS": "true"}, logs=False)
+        self.assertFalse(matching(result, "print-marker hello"))
+        self.assertFalse(matching(result, "logging-marker once"))
+
+
+#: Printed in the request as text lines (in the default run, logs off).
+STAMPED_TEXT = (
+    "print-marker hello",
+    "ansi-marker red",
+    "split-marker joined",
+    "stderr-marker something odd",
+    "word-marker went wrong",
+    "logfmt-marker slow query",
+    "gunicorn-marker booting",
+    "writelines-marker one",
+    "logging-marker once",
+    "routed-marker once",
+    "loguru-marker once",
+    "loguru-extra-marker",
+    "structlog-marker placed",
+    "marker whole",
+    "main-marker between",
+    "exception-logged-marker failed",
+)
+STAMPED_JSON = ("json-marker from a JSON logger", "json-name-marker", "json-num-marker numeric")
+
+
+def printed_lines(result):
+    return (result["stdout"] + result["stderr"]).splitlines()
+
+
+def line_with(result, text):
+    found = [line for line in printed_lines(result) if text in line]
+    assert len(found) == 1, (text, found)
+    return found[0]
+
+
+class StampTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.result = run()
+
+    def test_text_lines_in_a_request_end_with_its_ids(self):
+        for text in STAMPED_TEXT:
+            line = line_with(self.result, text)
+            match = STAMP.search(line)
+            self.assertIsNotNone(match, line)
+            self.assertEqual(match.group(1), TRACE_ID, line)
+            self.assertEqual(line.count("trace_id"), 1, line)
+
+    def test_a_traceback_printed_in_a_request_is_stamped_line_by_line(self):
+        lines = [line for line in printed_lines(self.result) if "uncaught-marker" in line]
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertRegex(line, STAMP)
+
+    def test_json_lines_get_fields_and_stay_valid(self):
+        for text in STAMPED_JSON:
+            record = json.loads(line_with(self.result, text))
+            self.assertEqual(record["trace_id"], TRACE_ID)
+            self.assertRegex(record["span_id"], r"^[0-9a-f]{16}$")
+
+    def test_left_alone(self):
+        self.assertEqual(line_with(self.result, "outer-print-line"), "outer-print-line plain")
+        self.assertEqual(json.loads(line_with(self.result, "outer-json-line")), {"msg": "outer-json-line"})
+        self.assertEqual(line_with(self.result, "outside-marker"), "outside-marker no newline")
+        self.assertEqual(line_with(self.result, "has-id-marker"), "has-id-marker trace_id=0123 already")
+        self.assertEqual(line_with(self.result, "sdk-marker"), "[Zharp] sdk-marker own line")
+
+    def test_stamped_with_logs_on_too(self):
+        result = run(logs=True)
+        for text in STAMPED_TEXT:
+            self.assertRegex(line_with(result, text), STAMP)
+
+    def test_turned_off_by_env(self):
+        self.check_off(run({"ZHARP_LOG_CORRELATION": "false"}))
+
+    def test_turned_off_by_argument(self):
+        self.check_off(run(log_correlation=False))
+
+    def check_off(self, result):
+        stamped = [line for line in printed_lines(result) if "trace_id" in line]
+        self.assertEqual(stamped, ["has-id-marker trace_id=0123 already"])
+        self.assertEqual(line_with(result, "print-marker"), "print-marker hello")
 
 
 class ParseLineTest(unittest.TestCase):

@@ -98,7 +98,7 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
 
     logger_provider = _logger_provider(resource)
     logger_provider.add_log_record_processor(ContextLogProcessor())
-    if options.capture_output:
+    if options.logs and options.capture_output:
         logger_provider.add_log_record_processor(_output.SentLineProcessor())
     logger_provider.add_log_record_processor(_log_processor(log_exporter, batch))
 
@@ -109,7 +109,12 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
 
     handler = None
     if options.logging_level is not None:
-        handler = _bridge_logging(logger_provider, options.logging_level)
+        # Logs off: the bridge stays for exceptions only (they are errors), at ERROR and above, so
+        # the root logger's level isn't lowered either.
+        level = options.logging_level if options.logs else max(options.logging_level, logging.ERROR)
+        handler = _bridge_logging(logger_provider, level)
+        if not options.logs:
+            handler.addFilter(_loggers.ExceptionsOnly())
 
     state = State(options, tracer_provider, logger_provider, handler)
     if options.instrument:
@@ -119,15 +124,28 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
 
 
 def _start_captures(state: State) -> None:
-    """The exact log captures (``logging`` loggers that don't propagate, loguru, structlog), then
-    the output capture last, so it wraps whatever they print."""
+    """What the app logs and prints.
+
+    Logs on (``logs=True``): the exact captures (``logging`` loggers that don't propagate, loguru,
+    structlog) and the output capture send it. Logs off (the default, where the Zharp agent reads
+    the app's output): nothing of it is sent, except exceptions, which are errors.
+
+    Either way, unless ``log_correlation=False``, each line printed in a request ends with its
+    trace and span id, so the agent's copy is linked to the request."""
     options = state.options
     try:
         state.teardowns.append(_loggers.capture_logging(lambda: state.handler))
+        # The stand-ins for sys.stdout/sys.stderr come first, so loguru and structlog, imported
+        # next, print through them.
+        stop_streams, replaced = _output.wrap_streams(
+            state.logger if options.logs and options.capture_output else None, stamp=options.log_correlation
+        )
+        state.teardowns.append(stop_streams)
         threshold = options.logging_level if options.logging_level is not None else logging.INFO
-        state.teardowns.extend(_loggers.capture_libraries(state.logger, threshold))
-        if options.capture_output:
-            state.teardowns.append(_output.capture_output(state.logger))
+        state.teardowns.extend(_loggers.capture_libraries(state.logger, threshold, options.logs))
+        if options.log_correlation:
+            state.teardowns.append(_loggers.rebind_streams(replaced))
+            state.teardowns.append(_loggers.stamp_logging())
     except Exception as error:
         _log.debug("Zharp: log capture: %s", error)
 

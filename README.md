@@ -35,8 +35,7 @@ That's all. What gets instrumented, when installed: Django, FastAPI, Flask, `req
 `psycopg`, `psycopg2`, SQLAlchemy. Any other OpenTelemetry instrumentation you add is sent too.
 
 Leave arguments out to read them from the environment: `ZHARP_KEY`, `ZHARP_SERVICE` (then
-`OTEL_SERVICE_NAME`), `ZHARP_ENVIRONMENT`, `ZHARP_RELEASE`, `ZHARP_ENDPOINT`. `ZHARP_DISABLED=true`
-turns it off.
+`OTEL_SERVICE_NAME`), `ZHARP_ENVIRONMENT`, `ZHARP_RELEASE`. `ZHARP_DISABLED=true` turns it off.
 
 ## Users and sessions
 
@@ -51,26 +50,48 @@ zharp.set_user(id=user.id, email=user.email)   # for the rest of this request
 
 ## Logs
 
-`logging` is bridged: records at `INFO` and above (`logging_level=` to change, `False` to leave
-`logging` alone) are sent with the active trace and the request's user. Or log to Zharp directly:
+On a server, your app's logs come in through the **Zharp agent**, which reads the app's output
+(container or pod logs, log files). The SDK doesn't send them too — that would make every line
+arrive twice. Instead, every line printed during a request ends with the request's ids:
+
+```text
+Order placed for 42 trace_id=5bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7
+{"level": "info", "msg": "Order placed", "trace_id": "5bf92f…", "span_id": "00f067…"}
+```
+
+so Zharp links each line the agent collects to its request and trace. A JSON line gets `trace_id`
+and `span_id` fields and stays valid JSON. `logging` (every handler: console, file, syslog),
+loguru, structlog, `print()` and anything else written to stdout/stderr are stamped. Lines printed
+outside a request, lines that already carry a `trace_id`, and the SDK's own `[Zharp]` lines are left
+as they are. `log_correlation=False` (or `ZHARP_LOG_CORRELATION=false`) turns the stamp off.
+
+**No agent** (serverless, a job, a laptop)? Have the SDK send the logs itself:
+
+```python
+zharp.init(key="zpk_…", service="checkout-api", logs=True)   # or ZHARP_LOGS=true
+```
+
+With `logs=True`:
+
+- `logging` records at `INFO` and above are sent (`logging_level=` to change, `False` to leave
+  `logging` alone), from every logger, also those that don't propagate to the root (uvicorn's and
+  gunicorn's, libraries that set `propagate = False`).
+- loguru and structlog are sent with their level and fields (`bind()`, `extra`, keyword arguments);
+  structlog on top of `logging` goes through `logging`.
+- Everything else the app prints — `print()`, libraries writing to `sys.stdout`/`sys.stderr` — is
+  sent too (`capture_output`, on with `logs`). Its level is read from the line: a JSON record's
+  own `level`/`severity`/`levelname` (Python's numbers too), or a word such as `ERROR`, `[warn]`,
+  `level=error`, `WARNING:root:`; otherwise stdout is info and stderr a warning. Colour codes are
+  dropped, lines are capped at 32 KB and an unfinished line is sent after 200 ms.
+  `capture_output=False` (or `ZHARP_CAPTURE_OUTPUT=false`) keeps only the logging libraries.
+- Each line is sent once, in the request it was written in, and your app prints everything exactly
+  as before.
+
+Either way, errors (below), traces and logs you send to Zharp directly are sent:
 
 ```python
 zharp.log.info("Order placed", {"order_id": 42})   # debug, info, warn, error, fatal
 ```
-
-Every logger is included, also those that don't propagate to the root (uvicorn's and gunicorn's
-access and error logs, libraries that set `propagate = False`). loguru and structlog are captured
-too, with their level and fields (`bind()`, `extra`, keyword arguments); structlog on top of
-`logging` goes through the `logging` bridge.
-
-Everything else the app prints — `print()`, libraries writing to `sys.stdout`/`sys.stderr`
-directly — is sent as well (`capture_output`, on by default). Each line keeps the request it was
-printed in. Its level is read from the line: a JSON record's own `level`/`severity`/`levelname`
-(Python's numbers too), or a word such as `ERROR`, `[warn]`, `level=error`, `WARNING:root:`;
-otherwise stdout is info and stderr a warning. Colour codes are dropped, lines are capped at 32 KB
-and an unfinished line is sent after 200 ms. A line sent by `logging`, loguru or structlog is never
-sent a second time when it is printed, and your app prints everything exactly as before.
-`capture_output=False` (or `ZHARP_CAPTURE_OUTPUT=false`) turns the catch-all off.
 
 ## Errors
 
@@ -127,11 +148,12 @@ Whether or not bodies are on, secret-looking values in URL query strings (`?toke
 To send logs and errors without tracing:
 
 ```python
-zharp.init(key="zpk_…", service="checkout-api", tracing=False)   # or ZHARP_TRACING=false
+zharp.init(key="zpk_…", service="checkout-api", tracing=False, logs=True)   # or ZHARP_TRACING=false ZHARP_LOGS=true
 ```
 
-Logs (`zharp.log.*` and `logging`), errors (uncaught and `capture_error`), the user, session and
-tags still go out. No spans are recorded or sent, HTTP clients and databases aren't instrumented,
+Logs (`zharp.log.*`, and with `logs=True` everything the app logs and prints), errors (uncaught and
+`capture_error`), the user, session and tags still go out; lines printed in a request are still
+stamped with the caller's trace id. No spans are recorded or sent, HTTP clients and databases aren't instrumented,
 and no `traceparent`/`baggage` is added to outgoing requests. Django, FastAPI and Flask are hooked
 with a no-op tracer only to read the incoming `traceparent` and `baggage`, so a request's logs still
 carry the caller's trace id, user and session. `zharp.start_span()` runs its work without a span.
@@ -151,14 +173,15 @@ zharp.flush()                                       # send now: end of a job or 
 | `service` | `ZHARP_SERVICE`, `OTEL_SERVICE_NAME` | `name` in `pyproject.toml` |
 | `environment` | `ZHARP_ENVIRONMENT` | none |
 | `release` | `ZHARP_RELEASE` | none |
-| `endpoint` | `ZHARP_ENDPOINT` | `https://api.zharp.io/api/v1/otlp` |
 | `sample_rate` | `ZHARP_SAMPLE_RATE` | `1.0` (share of traces kept; logs and handled errors always sent) |
-| `logging_level` | `ZHARP_LOGGING_LEVEL` | `INFO` |
+| `logs` | `ZHARP_LOGS` | `False` (the Zharp agent brings logs in; `True` where there's no agent) |
+| `log_correlation` | `ZHARP_LOG_CORRELATION` | `True` (each line printed in a request ends with `trace_id=… span_id=…`) |
+| `logging_level` | `ZHARP_LOGGING_LEVEL` | `INFO` (with `logs=True`) |
 | `capture_uncaught` | — | `True` |
 | `instrument` | — | `True` |
 | `tracing` | `ZHARP_TRACING` | `True` (`False`: logs only) |
 | `capture_bodies` | `ZHARP_CAPTURE_BODIES` | off (`"errors"`, `"all"`, or `CaptureBodies(…)`) |
-| `capture_output` | `ZHARP_CAPTURE_OUTPUT` | `True` (everything else printed to stdout/stderr is sent as logs; level read from the line; never sent twice) |
+| `capture_output` | `ZHARP_CAPTURE_OUTPUT` | `True` (with `logs=True`: everything else printed to stdout/stderr is sent too) |
 
 Telemetry is batched and sent every 5 seconds from a background thread, gzip-compressed, and
 whatever is left goes when the program exits. `init()` never raises.
@@ -170,8 +193,7 @@ python -m venv .venv && .venv/bin/pip install -e . flask fastapi httpx requests 
 .venv/bin/python -m unittest discover -s tests
 ```
 
-`examples/fastapi_app.py` and `examples/crash.py` run against any Zharp endpoint (set `ZHARP_KEY`
-and `ZHARP_ENDPOINT`).
+`examples/fastapi_app.py` and `examples/crash.py` run with a key in `ZHARP_KEY`.
 
 ### Releasing
 

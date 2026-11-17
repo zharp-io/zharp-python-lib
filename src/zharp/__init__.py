@@ -7,8 +7,9 @@
     zharp.init(key="zpk_…", service="checkout-api", environment="production")
 
 That's all a Django, FastAPI or Flask app needs: requests, outgoing HTTP calls (requests, httpx),
-database queries (psycopg, psycopg2, SQLAlchemy) and ``logging`` records are sent with their
-trace, and errors become Zharp issues. It is a thin layer over the official OpenTelemetry SDK —
+database queries (psycopg, psycopg2, SQLAlchemy) are traced, errors become Zharp issues, and each
+line the app prints during a request ends with its trace and span id, for the Zharp agent that
+reads the output (``logs=True`` sends the logs from the SDK instead, where there is no agent). It is a thin layer over the official OpenTelemetry SDK —
 anything you instrument with OpenTelemetry yourself is sent too.
 """
 
@@ -61,6 +62,8 @@ def init(
     tracing: Optional[bool] = None,
     capture_bodies: Union[bool, str, Mapping[str, Any], CaptureBodies, None] = None,
     capture_output: Optional[bool] = None,
+    logs: Optional[bool] = None,
+    log_correlation: Optional[bool] = None,
     quiet: bool = False,
     _exporters=None,
     _batch: bool = True,
@@ -69,14 +72,15 @@ def init(
     top of manage.py / wsgi.py / asgi.py, or in the module that creates the FastAPI or Flask app.
 
     Anything not passed is read from the environment: ``ZHARP_KEY``, ``ZHARP_SERVICE`` (then
-    ``OTEL_SERVICE_NAME``), ``ZHARP_ENVIRONMENT``, ``ZHARP_RELEASE``, ``ZHARP_ENDPOINT``,
-    ``ZHARP_SAMPLE_RATE``, ``ZHARP_LOGGING_LEVEL``, ``ZHARP_TRACING``, ``ZHARP_CAPTURE_OUTPUT``. ``ZHARP_DISABLED=true`` turns
+    ``OTEL_SERVICE_NAME``), ``ZHARP_ENVIRONMENT``, ``ZHARP_RELEASE``,
+    ``ZHARP_SAMPLE_RATE``, ``ZHARP_LOGGING_LEVEL``, ``ZHARP_TRACING``, ``ZHARP_LOGS``,
+    ``ZHARP_LOG_CORRELATION``, ``ZHARP_CAPTURE_OUTPUT``. ``ZHARP_DISABLED=true`` turns
     it off.
 
     :param sample_rate: share of traces kept, 0.0–1.0 (default 1.0). Logs and handled errors are
         always sent.
-    :param logging_level: the lowest ``logging`` level sent (default ``"INFO"``); ``False``
-        leaves ``logging`` alone.
+    :param logging_level: with ``logs=True``, the lowest ``logging`` level sent (default
+        ``"INFO"``); ``False`` leaves ``logging`` alone.
     :param capture_uncaught: report exceptions that end the program or a thread.
     :param instrument: instrument the supported libraries that are installed.
     :param tracing: ``False`` for logs only: logs, errors, user and tags are sent, no spans are
@@ -93,7 +97,17 @@ def init(
         secret-looking keys (``password``, ``token``, ``authorization``, ``card`` …) become
         ``[Filtered]`` before anything is sent. Secret-looking query values in URLs are masked on
         every span either way.
-    :param capture_output: send everything else the process prints as logs too: whatever
+    :param logs: send what the app logs and prints (``logging``, loguru, structlog, ``print()``,
+        anything written to stdout/stderr). Default ``False`` (``ZHARP_LOGS=true`` in the
+        environment): on a server the Zharp agent reads the app's output and brings those lines
+        in, linked to their request by ``log_correlation``. Turn it on where there is no agent,
+        such as serverless. Errors (uncaught, ``capture_error``, ``logger.exception``), traces and
+        ``zharp.log`` are sent either way.
+    :param log_correlation: end each line printed during a request with its ids,
+        `` trace_id=<32 hex> span_id=<16 hex>`` (a JSON line gets ``trace_id`` and ``span_id``
+        fields instead). Lines outside a request, and those already carrying a trace_id, are left
+        as they are. Default ``True``; ``ZHARP_LOG_CORRELATION=false`` turns it off.
+    :param capture_output: with ``logs=True``, send everything else the process prints as logs too: whatever
         reaches ``sys.stdout`` or ``sys.stderr`` without going through ``logging``, loguru or
         structlog — ``print()``, libraries writing to the streams directly. Default ``True``. Each
         line keeps the request it was printed in; its level is read from the line (a JSON
@@ -112,7 +126,7 @@ def init(
                 return False
             options = _config.resolve(
                 key, service, environment, release, endpoint, sample_rate, logging_level, capture_uncaught, instrument,
-                tracing, capture_bodies, capture_output,
+                tracing, capture_bodies, capture_output, logs, log_correlation,
             )
             if options is None:
                 if not quiet:
@@ -139,8 +153,8 @@ def is_active() -> bool:
 class _Log:
     """``zharp.log.info("message", {"order_id": 1})`` — debug, info, warn (warning), error, fatal.
 
-    Each log carries the active trace and the request's user and session. ``logging`` records are
-    sent too; this is for logs you only want in Zharp.
+    Each log carries the active trace and the request's user and session. Sent whether or not
+    ``logs`` is on: this is for logs you want in Zharp from the SDK itself.
     """
 
     def debug(self, message: Any, attributes: Optional[Mapping[str, Any]] = None) -> None:

@@ -2,8 +2,20 @@
 
 ## Unreleased
 
-- Every log line reaches Zharp, tied to the request it was written in:
-  - `capture_output` (and `ZHARP_CAPTURE_OUTPUT`), on by default: whatever is printed to
+- **Logs are off by default** (`logs=False`, `ZHARP_LOGS`): on a server the Zharp agent reads the
+  app's output and brings its logs in; the SDK sending them too made every line arrive twice. With
+  logs off nothing the app logs or prints is sent — not `logging`, loguru, structlog or stdout.
+  Errors (uncaught, `capture_error`, `logger.exception`), traces and `zharp.log` are sent as
+  before, and `logging` no longer lowers the root logger's level. `logs=True` (or
+  `ZHARP_LOGS=true`) where there is no agent, such as serverless.
+- **Log correlation** (`log_correlation=True`, `ZHARP_LOG_CORRELATION=false` to turn off): every
+  line printed during a request ends with ` trace_id=<32 hex> span_id=<16 hex>`; a JSON line gets
+  `trace_id` and `span_id` fields and stays valid JSON. Added at the handler for `logging` (every
+  handler, files too) and on stdout/stderr for everything else (`print()`, loguru, structlog —
+  their streams captured at import are pointed at it). Lines outside a request, lines already
+  carrying a `trace_id` and the SDK's `[Zharp]` lines are left alone; a line is never stamped twice.
+- With `logs=True`, every log line reaches Zharp, tied to the request it was written in:
+  - `capture_output` (and `ZHARP_CAPTURE_OUTPUT`), on with `logs`: whatever is printed to
     `sys.stdout`/`sys.stderr` without a logging library — `print()`, libraries writing to the
     streams — is sent as logs. Level read from the line (JSON `level`/`severity`/`levelname`,
     Python's numeric levels, words like `ERROR`, `[warn]`, `level=error`), else info (stdout) or

@@ -32,6 +32,10 @@ class Options:
     capture_bodies: Any = None
     #: ``capture_output``: everything else printed to stdout/stderr is sent as logs too.
     capture_output: bool = True
+    #: ``logs``: send what the app logs and prints. Off by default: the Zharp agent reads it.
+    logs: bool = False
+    #: ``log_correlation``: the request's ids at the end of each line printed in it.
+    log_correlation: bool = True
 
 
 def env_value(name: str) -> Optional[str]:
@@ -120,6 +124,8 @@ def resolve(
     tracing: Optional[bool] = None,
     capture_bodies: Any = None,
     capture_output: Optional[bool] = None,
+    logs: Optional[bool] = None,
+    log_correlation: Optional[bool] = None,
 ) -> Optional[Options]:
     """The options, explicit values first, then ``ZHARP_*``. None when there is no key."""
     resolved_key = pick(key, env_value("ZHARP_KEY"), env_value("ZHARP_API_KEY"))
@@ -147,6 +153,8 @@ def resolve(
         tracing=tracing_of(tracing),
         capture_bodies=_bodies.body_settings(capture_bodies, env_value("ZHARP_CAPTURE_BODIES")),
         capture_output=capture_output_of(capture_output),
+        logs=switch(logs, "ZHARP_LOGS", False),
+        log_correlation=switch(log_correlation, "ZHARP_LOG_CORRELATION", True),
     )
 
 
@@ -155,6 +163,15 @@ def tracing_of(value: Optional[bool]) -> bool:
     if value is not None:
         return bool(value)
     return flag_of(env_value("ZHARP_TRACING")) is not False
+
+
+def switch(value: Optional[bool], variable: str, default: bool) -> bool:
+    """An on/off setting: the argument when passed, else the environment variable, else the
+    default."""
+    if value is not None:
+        return bool(value)
+    flag = flag_of(env_value(variable))
+    return default if flag is None else flag
 
 
 def capture_output_of(value: Optional[bool]) -> bool:

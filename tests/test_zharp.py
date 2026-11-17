@@ -37,6 +37,7 @@ def setUpModule():
         service="unit-test-api",
         environment="test",
         release="api@1.2.3",
+        logs=True,
         quiet=True,
         _exporters=(SPANS, LOGS),
         _batch=False,
