@@ -60,6 +60,7 @@ def init(
     instrument: bool = True,
     tracing: Optional[bool] = None,
     capture_bodies: Union[bool, str, Mapping[str, Any], CaptureBodies, None] = None,
+    capture_output: Optional[bool] = None,
     quiet: bool = False,
     _exporters=None,
     _batch: bool = True,
@@ -69,7 +70,7 @@ def init(
 
     Anything not passed is read from the environment: ``ZHARP_KEY``, ``ZHARP_SERVICE`` (then
     ``OTEL_SERVICE_NAME``), ``ZHARP_ENVIRONMENT``, ``ZHARP_RELEASE``, ``ZHARP_ENDPOINT``,
-    ``ZHARP_SAMPLE_RATE``, ``ZHARP_LOGGING_LEVEL``, ``ZHARP_TRACING``. ``ZHARP_DISABLED=true`` turns
+    ``ZHARP_SAMPLE_RATE``, ``ZHARP_LOGGING_LEVEL``, ``ZHARP_TRACING``, ``ZHARP_CAPTURE_OUTPUT``. ``ZHARP_DISABLED=true`` turns
     it off.
 
     :param sample_rate: share of traces kept, 0.0–1.0 (default 1.0). Logs and handled errors are
@@ -92,6 +93,13 @@ def init(
         secret-looking keys (``password``, ``token``, ``authorization``, ``card`` …) become
         ``[Filtered]`` before anything is sent. Secret-looking query values in URLs are masked on
         every span either way.
+    :param capture_output: send everything else the process prints as logs too: whatever
+        reaches ``sys.stdout`` or ``sys.stderr`` without going through ``logging``, loguru or
+        structlog — ``print()``, libraries writing to the streams directly. Default ``True``. Each
+        line keeps the request it was printed in; its level is read from the line (a JSON
+        record's ``level``, a word such as ``ERROR`` or ``[warn]``), else info on stdout and
+        warning on stderr. A line another capture already sent is not sent again. ``False`` (or
+        ``ZHARP_CAPTURE_OUTPUT=false``) turns it off.
 
     Returns True when it started. Never raises.
     """
@@ -104,7 +112,7 @@ def init(
                 return False
             options = _config.resolve(
                 key, service, environment, release, endpoint, sample_rate, logging_level, capture_uncaught, instrument,
-                tracing, capture_bodies,
+                tracing, capture_bodies, capture_output,
             )
             if options is None:
                 if not quiet:
@@ -300,6 +308,8 @@ def shutdown() -> None:
     _state = None
     if state is None:
         return
+    # First: the output capture sends any unfinished line while the providers still run.
+    state.stop_captures()
     for provider in (state.tracer_provider, state.logger_provider):
         if provider is None:
             continue

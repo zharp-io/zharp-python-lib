@@ -58,6 +58,20 @@ zharp.set_user(id=user.id, email=user.email)   # for the rest of this request
 zharp.log.info("Order placed", {"order_id": 42})   # debug, info, warn, error, fatal
 ```
 
+Every logger is included, also those that don't propagate to the root (uvicorn's and gunicorn's
+access and error logs, libraries that set `propagate = False`). loguru and structlog are captured
+too, with their level and fields (`bind()`, `extra`, keyword arguments); structlog on top of
+`logging` goes through the `logging` bridge.
+
+Everything else the app prints — `print()`, libraries writing to `sys.stdout`/`sys.stderr`
+directly — is sent as well (`capture_output`, on by default). Each line keeps the request it was
+printed in. Its level is read from the line: a JSON record's own `level`/`severity`/`levelname`
+(Python's numbers too), or a word such as `ERROR`, `[warn]`, `level=error`, `WARNING:root:`;
+otherwise stdout is info and stderr a warning. Colour codes are dropped, lines are capped at 32 KB
+and an unfinished line is sent after 200 ms. A line sent by `logging`, loguru or structlog is never
+sent a second time when it is printed, and your app prints everything exactly as before.
+`capture_output=False` (or `ZHARP_CAPTURE_OUTPUT=false`) turns the catch-all off.
+
 ## Errors
 
 An exception that escapes a request is reported (unhandled) with the request's trace; so is one
@@ -143,6 +157,8 @@ zharp.flush()                                       # send now: end of a job or 
 | `capture_uncaught` | — | `True` |
 | `instrument` | — | `True` |
 | `tracing` | `ZHARP_TRACING` | `True` (`False`: logs only) |
+| `capture_bodies` | `ZHARP_CAPTURE_BODIES` | off (`"errors"`, `"all"`, or `CaptureBodies(…)`) |
+| `capture_output` | `ZHARP_CAPTURE_OUTPUT` | `True` (everything else printed to stdout/stderr is sent as logs; level read from the line; never sent twice) |
 
 Telemetry is batched and sent every 5 seconds from a background thread, gzip-compressed, and
 whatever is left goes when the program exits. `init()` never raises.
@@ -150,7 +166,7 @@ whatever is left goes when the program exits. `init()` never raises.
 ## Development
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -e . flask fastapi httpx requests django uvicorn
+python -m venv .venv && .venv/bin/pip install -e . flask fastapi httpx requests django uvicorn loguru structlog
 .venv/bin/python -m unittest discover -s tests
 ```
 

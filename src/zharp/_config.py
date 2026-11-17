@@ -30,6 +30,8 @@ class Options:
     tracing: bool = True
     #: ``capture_bodies``: request and response bodies on HTTP spans; None when off.
     capture_bodies: Any = None
+    #: ``capture_output``: everything else printed to stdout/stderr is sent as logs too.
+    capture_output: bool = True
 
 
 def env_value(name: str) -> Optional[str]:
@@ -117,6 +119,7 @@ def resolve(
     instrument: bool,
     tracing: Optional[bool] = None,
     capture_bodies: Any = None,
+    capture_output: Optional[bool] = None,
 ) -> Optional[Options]:
     """The options, explicit values first, then ``ZHARP_*``. None when there is no key."""
     resolved_key = pick(key, env_value("ZHARP_KEY"), env_value("ZHARP_API_KEY"))
@@ -143,6 +146,7 @@ def resolve(
         instrument=instrument,
         tracing=tracing_of(tracing),
         capture_bodies=_bodies.body_settings(capture_bodies, env_value("ZHARP_CAPTURE_BODIES")),
+        capture_output=capture_output_of(capture_output),
     )
 
 
@@ -151,6 +155,13 @@ def tracing_of(value: Optional[bool]) -> bool:
     if value is not None:
         return bool(value)
     return flag_of(env_value("ZHARP_TRACING")) is not False
+
+
+def capture_output_of(value: Optional[bool]) -> bool:
+    """``capture_output=`` when passed, then ``ZHARP_CAPTURE_OUTPUT``; on by default."""
+    if value is not None:
+        return bool(value)
+    return flag_of(env_value("ZHARP_CAPTURE_OUTPUT")) is not False
 
 
 def announce(message: str) -> None:

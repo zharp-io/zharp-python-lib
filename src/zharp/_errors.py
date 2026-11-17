@@ -14,6 +14,7 @@ import time
 import traceback
 from typing import Any, Dict, Optional
 
+from . import _output
 from ._context import DUPLICATE_EXCEPTION, EXCEPTION_MESSAGE_OVERRIDE, EXCEPTION_TYPE_OVERRIDE
 
 _MARK = "__zharp_reported__"
@@ -132,7 +133,9 @@ def install_uncaught_hooks(report, flush) -> None:
         except Exception:
             pass
         previous = _Hooks.previous_sys or sys.__excepthook__
-        previous(exc_type, exc, tb)
+        # Reported above with its stack: the traceback it prints isn't sent again line by line.
+        with _output.quiet():
+            previous(exc_type, exc, tb)
 
     sys.excepthook = excepthook
 
@@ -147,7 +150,8 @@ def install_uncaught_hooks(report, flush) -> None:
             except Exception:
                 pass
             previous = _Hooks.previous_threading or threading.__excepthook__
-            previous(args)
+            with _output.quiet():
+                previous(args)
 
         threading.excepthook = thread_excepthook
 

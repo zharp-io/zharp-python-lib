@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Every log line reaches Zharp, tied to the request it was written in:
+  - `capture_output` (and `ZHARP_CAPTURE_OUTPUT`), on by default: whatever is printed to
+    `sys.stdout`/`sys.stderr` without a logging library — `print()`, libraries writing to the
+    streams — is sent as logs. Level read from the line (JSON `level`/`severity`/`levelname`,
+    Python's numeric levels, words like `ERROR`, `[warn]`, `level=error`), else info (stdout) or
+    warning (stderr). Lines split per thread, colour codes dropped, 32 KB cap, an unfinished line
+    sent after 200 ms. The app prints exactly as before.
+  - `logging` loggers that don't propagate to the root (uvicorn, gunicorn, `propagate = False`)
+    are sent too.
+  - loguru and structlog are captured with their level and fields (a sink that survives
+    `logger.remove()`; structlog events as the processors accept them).
+  - A line is sent once: what a capture prints isn't read again, nested captures (logging routed
+    into loguru and back) send it from the outer one, and a line printed shortly after it was sent
+    (queued handlers) is skipped. The traceback printed for an uncaught exception, already reported
+    as an error, isn't sent line by line.
+
 ## 0.2.0 (`zharp`)
 
 - `capture_bodies` (and `ZHARP_CAPTURE_BODIES`): request and response bodies on HTTP spans, off by

@@ -22,7 +22,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-from . import _capture, _errors
+from . import _capture, _errors, _loggers, _output
 from ._config import Options, announce
 from ._context import ContextLogProcessor, ContextSpanProcessor
 from ._version import __version__
@@ -42,6 +42,15 @@ class State:
         )
         self.logger = logger_provider.get_logger("zharp", __version__)
         self.instrumented: List[str] = []
+        #: Undo the log captures, last first, at shutdown.
+        self.teardowns: List[Callable[[], None]] = []
+
+    def stop_captures(self) -> None:
+        while self.teardowns:
+            try:
+                self.teardowns.pop()()
+            except Exception:
+                pass
 
 
 def resource_for(options: Options) -> Resource:
@@ -89,6 +98,8 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
 
     logger_provider = _logger_provider(resource)
     logger_provider.add_log_record_processor(ContextLogProcessor())
+    if options.capture_output:
+        logger_provider.add_log_record_processor(_output.SentLineProcessor())
     logger_provider.add_log_record_processor(_log_processor(log_exporter, batch))
 
     propagate.set_global_textmap(CompositePropagator([TraceContextTextMapPropagator(), W3CBaggagePropagator()]))
@@ -103,7 +114,22 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
     state = State(options, tracer_provider, logger_provider, handler)
     if options.instrument:
         state.instrumented = instrument_installed(options.capture_bodies) if options.tracing else instrument_logs_only()
+    _start_captures(state)
     return state
+
+
+def _start_captures(state: State) -> None:
+    """The exact log captures (``logging`` loggers that don't propagate, loguru, structlog), then
+    the output capture last, so it wraps whatever they print."""
+    options = state.options
+    try:
+        state.teardowns.append(_loggers.capture_logging(lambda: state.handler))
+        threshold = options.logging_level if options.logging_level is not None else logging.INFO
+        state.teardowns.extend(_loggers.capture_libraries(state.logger, threshold))
+        if options.capture_output:
+            state.teardowns.append(_output.capture_output(state.logger))
+    except Exception as error:
+        _log.debug("Zharp: log capture: %s", error)
 
 
 def _tracer_provider(resource: Resource, options: Options):
@@ -164,6 +190,7 @@ def _bridge_logging(logger_provider, level: int) -> logging.Handler:
         warnings.simplefilter("ignore", DeprecationWarning)
         handler = _handler_class()(level=level, logger_provider=logger_provider)
     handler.addFilter(_errors.ExceptionFilter())
+    handler.addFilter(_loggers.OwnerFilter())
     handler._zharp = True  # type: ignore[attr-defined]
 
     root = logging.getLogger()
