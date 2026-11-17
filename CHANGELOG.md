@@ -14,6 +14,9 @@
   handler, files too) and on stdout/stderr for everything else (`print()`, loguru, structlog —
   their streams captured at import are pointed at it). Lines outside a request, lines already
   carrying a `trace_id` and the SDK's `[Zharp]` lines are left alone; a line is never stamped twice.
+  A multi-line record (a logged exception, a printed traceback) gets one stamp, at the end of its
+  last line. On a terminal nothing is held back; collected output (pipes, files, container logs)
+  holds a piece of a line printed in a request until its newline, a flush or 200 ms.
 - With `logs=True`, every log line reaches Zharp, tied to the request it was written in:
   - `capture_output` (and `ZHARP_CAPTURE_OUTPUT`), on with `logs`: whatever is printed to
     `sys.stdout`/`sys.stderr` without a logging library — `print()`, libraries writing to the

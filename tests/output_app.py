@@ -11,6 +11,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -101,6 +102,10 @@ def main(out_path):
             raise KeyError("exception-marker")
         except KeyError:
             shop.exception("exception-logged-marker failed")
+        try:
+            raise TypeError("printed-trace-marker")
+        except TypeError:
+            traceback.print_exc(file=sys.stdout)
         try:
             raise LookupError("captured-marker")
         except LookupError as error:

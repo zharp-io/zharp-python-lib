@@ -63,7 +63,9 @@ so Zharp links each line the agent collects to its request and trace. A JSON lin
 and `span_id` fields and stays valid JSON. `logging` (every handler: console, file, syslog),
 loguru, structlog, `print()` and anything else written to stdout/stderr are stamped. Lines printed
 outside a request, lines that already carry a `trace_id`, and the SDK's own `[Zharp]` lines are left
-as they are. `log_correlation=False` (or `ZHARP_LOG_CORRELATION=false`) turns the stamp off.
+as they are. A record that spans several lines (a logged exception, a printed traceback) gets one
+stamp, at the end of its last line. `log_correlation=False` (or `ZHARP_LOG_CORRELATION=false`)
+turns the stamp off.
 
 **No agent** (serverless, a job, a laptop)? Have the SDK send the logs itself:
 

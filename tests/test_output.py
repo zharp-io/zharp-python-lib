@@ -252,13 +252,25 @@ STAMPED_TEXT = (
     "structlog-marker placed",
     "marker whole",
     "main-marker between",
-    "exception-logged-marker failed",
 )
 STAMPED_JSON = ("json-marker from a JSON logger", "json-name-marker", "json-num-marker numeric")
 
 
 def printed_lines(result):
     return (result["stdout"] + result["stderr"]).splitlines()
+
+
+def record(result, first, last):
+    """The printed lines of one multi-line record, from the line containing ``first`` to the one
+    containing ``last``."""
+    for stream in (result["stdout"], result["stderr"]):
+        lines = stream.splitlines()
+        ends = [i for i, line in enumerate(lines) if last in line]
+        if ends:
+            end = ends[0]
+            start = next(i for i in range(end, -1, -1) if first in lines[i])
+            return lines[start : end + 1]
+    raise AssertionError("no record ending with " + last)
 
 
 def line_with(result, text):
@@ -280,11 +292,24 @@ class StampTest(unittest.TestCase):
             self.assertEqual(match.group(1), TRACE_ID, line)
             self.assertEqual(line.count("trace_id"), 1, line)
 
-    def test_a_traceback_printed_in_a_request_is_stamped_line_by_line(self):
-        lines = [line for line in printed_lines(self.result) if "uncaught-marker" in line]
-        self.assertTrue(lines)
-        for line in lines:
-            self.assertRegex(line, STAMP)
+    def check_one_stamp_at_the_end(self, lines):
+        self.assertGreater(len(lines), 3, lines)  # a message and its traceback
+        text = "\n".join(lines)
+        self.assertEqual(text.count("trace_id"), 1, text)
+        match = STAMP.search(lines[-1])
+        self.assertIsNotNone(match, lines[-1])
+        self.assertEqual(match.group(1), TRACE_ID)
+        # Joined into one entry, as the agent does, the stamp is still read from its end.
+        self.assertEqual(STAMP.search(text).group(1), TRACE_ID)
+
+    def test_a_logged_exception_has_one_stamp_at_its_end(self):
+        self.check_one_stamp_at_the_end(record(self.result, "exception-logged-marker failed", "KeyError: 'exception-marker'"))
+        # Flask logging the error that ended a request, on stderr.
+        self.check_one_stamp_at_the_end(record(self.result, "Exception on /boom", "ValueError: uncaught-marker"))
+
+    def test_a_printed_traceback_has_one_stamp_at_its_end(self):
+        lines = record(self.result, "Traceback (most recent call last)", "TypeError: printed-trace-marker")
+        self.check_one_stamp_at_the_end(lines)
 
     def test_json_lines_get_fields_and_stay_valid(self):
         for text in STAMPED_JSON:
@@ -314,6 +339,89 @@ class StampTest(unittest.TestCase):
         stamped = [line for line in printed_lines(result) if "trace_id" in line]
         self.assertEqual(stamped, ["has-id-marker trace_id=0123 already"])
         self.assertEqual(line_with(result, "print-marker"), "print-marker hello")
+
+
+class _Target:
+    """A stream that records each write; ``tty`` says whether it is a terminal."""
+
+    def __init__(self, tty):
+        self.tty = tty
+        self.writes = []
+
+    def isatty(self):
+        return self.tty
+
+    def write(self, text):
+        self.writes.append(text)
+        return len(text)
+
+    def flush(self):
+        pass
+
+
+class TerminalTest(unittest.TestCase):
+    """Collected output (a pipe) holds a piece of a line back for its stamp; a terminal doesn't."""
+
+    IDS = ("5bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7")
+
+    def stamper(self, tty):
+        target = _Target(tty)
+        return target, _output._Stamper(target, _output._Flusher())
+
+    def in_span(self, fn):
+        from opentelemetry import trace
+        from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
+
+        span = NonRecordingSpan(SpanContext(int(self.IDS[0], 16), int(self.IDS[1], 16), False, TraceFlags(1)))
+        with trace.use_span(span):
+            fn()
+
+    def test_a_terminal_gets_each_piece_at_once(self):
+        target, stamper = self.stamper(tty=True)
+
+        def write():
+            stamper.write("hello")
+            self.assertEqual(target.writes, ["hello"])  # no delay
+            stamper.write("\n")
+
+        self.in_span(write)
+        self.assertRegex("".join(target.writes).rstrip("\n"), STAMP)
+        self.assertEqual("".join(target.writes), "hello trace_id={} span_id={}\n".format(*self.IDS))
+
+    def test_a_pipe_holds_the_piece_until_its_newline(self):
+        target, stamper = self.stamper(tty=False)
+
+        def write():
+            stamper.write("hello")
+            self.assertEqual(target.writes, [])
+            stamper.write("\n")
+
+        self.in_span(write)
+        self.assertEqual(target.writes, ["hello trace_id={} span_id={}\n".format(*self.IDS)])
+
+    def test_a_traceback_printed_line_by_line_gets_one_stamp(self):
+        target, stamper = self.stamper(tty=True)
+        lines = ["Traceback (most recent call last):", '  File "app.py", line 3, in <module>', "    boom()", "ValueError: boom"]
+
+        def write():
+            for line in lines:
+                stamper.write(line + "\n")
+
+        self.in_span(write)
+        text = "".join(target.writes)
+        self.assertEqual(text.count("trace_id"), 1, text)
+        self.assertEqual(STAMP.search(text.rstrip("\n")).group(1), self.IDS[0])
+
+    def test_lines_printed_one_by_one_are_stamped_one_by_one(self):
+        target, stamper = self.stamper(tty=False)
+
+        def write():
+            for text in ("first line", "second line"):
+                stamper.write(text)
+                stamper.write("\n")
+
+        self.in_span(write)
+        self.assertEqual("".join(target.writes).count("trace_id"), 2)
 
 
 class ParseLineTest(unittest.TestCase):

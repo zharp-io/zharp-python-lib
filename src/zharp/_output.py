@@ -460,12 +460,33 @@ def stamp_line(line: str, ids: Tuple[str, str]) -> str:
     return "{} trace_id={} span_id={}{}{}".format(trimmed, trace_id, span_id, tail, cr)
 
 
-def stamp_text(text: str, ids: Optional[Tuple[str, str]] = None) -> str:
-    """Every line of ``text`` stamped with ``ids`` (else the active span's)."""
+def stamp_record(text: str, ids: Optional[Tuple[str, str]] = None) -> str:
+    """One record (a formatted ``logging`` record, which may span lines: a traceback, a multi-line
+    message) stamped once, at the end of its last line — the agent joins the lines into one entry
+    and Zharp reads the ids from its end."""
     ids = ids or current_ids()
-    if ids is None or not isinstance(text, str) or not text:
+    if ids is None or not isinstance(text, str) or not text or "trace_id" in text:
         return text
-    return "\n".join(stamp_line(line, ids) for line in text.split("\n"))
+    lines = text.split("\n")
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].strip():
+            lines[i] = stamp_line(lines[i], ids)
+            break
+    return "\n".join(lines)
+
+
+_CONTINUATION_STARTS = (
+    "Traceback (most recent call last)",
+    "Exception Group Traceback (most recent call last)",
+    "During handling of the above exception",
+    "The above exception was the direct cause",
+)
+
+
+def is_continuation(line: str) -> bool:
+    """A line inside a traceback (indented, or its header): its stamp goes on the traceback's last
+    line instead, the ``ValueError: …`` one."""
+    return line[:1] in (" ", "\t") or line.startswith(_CONTINUATION_STARTS)
 
 
 class _Line:
@@ -488,6 +509,13 @@ class _Stamper:
         self.target = target
         self.flusher = flusher
         self.enabled = True
+        # A terminal shows each piece as it comes: nothing is held back there, and a line gets
+        # its stamp only if it can be added without waiting. Holding back is for collected output
+        # (pipes, files, container logs), where the agent reads whole lines anyway.
+        try:
+            self.interactive = bool(target.isatty())
+        except Exception:
+            self.interactive = False
         self._lock = threading.RLock()
         self._lines: Dict[int, _Line] = {}
 
@@ -511,11 +539,18 @@ class _Stamper:
         line.held = ""
         parts = data.split("\n")
         out = []
-        for segment in parts[:-1]:
-            out.append(self._finish(line.written, segment, ids) + "\n")
+        # Lines finished by one write are one record (loguru writes a message and its traceback
+        # at once): one stamp, on the last. A write that already carries the ids (a logging
+        # handler's record, stamped at its end) is left as it is.
+        last = len(parts) - 2
+        stamp_ids = None if "trace_id" in text else ids
+        for index, segment in enumerate(parts[:-1]):
+            whole = line.written + segment
+            stamp = stamp_ids if index == last and not is_continuation(whole) else None
+            out.append(self._finish(line.written, segment, stamp) + "\n")
             line.written = ""
         rest = parts[-1]
-        if rest and ids is not None and len(rest) <= MAX_LINE:
+        if rest and ids is not None and not self.interactive and len(rest) <= MAX_LINE:
             line.held = rest
             line.since = time.monotonic()
             self.flusher.wake()

@@ -43,8 +43,9 @@ class ExceptionsOnly(logging.Filter):
 
 
 def stamp_logging() -> Undo:
-    """Every ``logging`` handler's output (stream, file, syslog …) ends with the request's ids:
-    ``Handler.format`` is the last step before a handler writes, whatever its formatter."""
+    """Every ``logging`` handler's output (stream, file, syslog …) ends with the request's ids,
+    once per record, after its last line (a traceback included): ``Handler.format`` is the last
+    step before a handler writes, whatever its formatter."""
     original = logging.Handler.format
     if getattr(original, "_zharp", False):
         return lambda: None
@@ -54,7 +55,7 @@ def stamp_logging() -> Undo:
         if getattr(self, "_zharp", False):
             return text  # the bridge: its records carry the ids as fields already
         try:
-            return _output.stamp_text(text)
+            return _output.stamp_record(text)
         except Exception:
             return text
 
