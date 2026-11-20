@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from . import _bodies
+from . import _bodies, _headers
 
 DEFAULT_ENDPOINT = "https://api.zharp.io/api/v1/otlp"
 
@@ -30,6 +30,10 @@ class Options:
     tracing: bool = True
     #: ``capture_bodies``: request and response bodies on HTTP spans; None when off.
     capture_bodies: Any = None
+    #: ``capture_headers``: secret-header patterns for request/response headers; None when off.
+    capture_headers: Any = None
+    #: ``capture_query_errors``: failed queries reported with the app's call site and the query.
+    capture_query_errors: bool = True
     #: ``capture_output``: everything else printed to stdout/stderr is sent as logs too.
     capture_output: bool = True
     #: ``logs``: send what the app logs and prints. Off by default: the Zharp agent reads it.
@@ -126,6 +130,8 @@ def resolve(
     capture_output: Optional[bool] = None,
     logs: Optional[bool] = None,
     log_correlation: Optional[bool] = None,
+    capture_headers: Any = None,
+    capture_query_errors: Optional[bool] = None,
 ) -> Optional[Options]:
     """The options, explicit values first, then ``ZHARP_*``. None when there is no key."""
     resolved_key = pick(key, env_value("ZHARP_KEY"), env_value("ZHARP_API_KEY"))
@@ -155,6 +161,8 @@ def resolve(
         capture_output=capture_output_of(capture_output),
         logs=switch(logs, "ZHARP_LOGS", False),
         log_correlation=switch(log_correlation, "ZHARP_LOG_CORRELATION", True),
+        capture_headers=_headers.header_settings(capture_headers, env_value("ZHARP_CAPTURE_HEADERS")),
+        capture_query_errors=switch(capture_query_errors, "ZHARP_CAPTURE_QUERY_ERRORS", True),
     )
 
 

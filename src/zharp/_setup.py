@@ -11,7 +11,7 @@ import threading
 from typing import Callable, List, Optional, Tuple
 
 from opentelemetry import propagate, trace
-from opentelemetry._logs import get_logger_provider, set_logger_provider
+from opentelemetry._logs import LogRecord, SeverityNumber, get_logger_provider, set_logger_provider
 from opentelemetry.baggage.propagation import W3CBaggagePropagator
 from opentelemetry.propagators.composite import CompositePropagator
 from opentelemetry.sdk._logs import LoggerProvider
@@ -22,7 +22,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-from . import _capture, _errors, _loggers, _output
+from . import _capture, _db_errors, _errors, _headers, _loggers, _output
 from ._config import Options, announce
 from ._context import ContextLogProcessor, ContextSpanProcessor
 from ._version import __version__
@@ -94,6 +94,10 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
         tracer_provider = _tracer_provider(resource, options)
         tracer_provider.add_span_processor(ContextSpanProcessor())
         tracer_provider.add_span_processor(_capture.UrlRedactionSpanProcessor())
+        if options.capture_query_errors:
+            # Before the exporter, so a failed query's held exception is reported before its trace ships.
+            _errors.db_errors = _db_errors.DbErrorSpanProcessor(_query_error_sender(lambda: logger_provider))
+            tracer_provider.add_span_processor(_errors.db_errors)
         tracer_provider.add_span_processor(_span_processor(span_exporter, batch))
 
     logger_provider = _logger_provider(resource)
@@ -117,10 +121,38 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
             handler.addFilter(_loggers.ExceptionsOnly())
 
     state = State(options, tracer_provider, logger_provider, handler)
+    if options.tracing:
+        _headers.apply(options.capture_headers)
     if options.instrument:
         state.instrumented = instrument_installed(options.capture_bodies) if options.tracing else instrument_logs_only()
     _start_captures(state)
     return state
+
+
+def _query_error_sender(provider):
+    """Reports a failed query nothing else reported: caught by the app, in the query's span."""
+
+    def send(exc, stack, attributes, span_context) -> None:
+        if _errors.is_reported(exc):
+            return
+        _errors.mark_reported(exc)
+        attrs = dict(attributes)
+        attrs.update(_errors.exception_attributes(exc, True))
+        attrs["exception.stacktrace"] = stack
+        attrs["zharp.mechanism"] = "db"
+        logger = provider().get_logger("zharp")
+        logger.emit(
+            LogRecord(
+                timestamp=_errors.now_ns(),
+                context=trace.set_span_in_context(trace.NonRecordingSpan(span_context)),
+                severity_text="ERROR",
+                severity_number=SeverityNumber.ERROR,
+                body="{}: {}".format(attrs["exception.type"], exc),
+                attributes=attrs,
+            )
+        )
+
+    return send
 
 
 def _start_captures(state: State) -> None:

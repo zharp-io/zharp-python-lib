@@ -64,6 +64,8 @@ def init(
     capture_output: Optional[bool] = None,
     logs: Optional[bool] = None,
     log_correlation: Optional[bool] = None,
+    capture_headers: Union[bool, Mapping[str, Any], None] = None,
+    capture_query_errors: Optional[bool] = None,
     quiet: bool = False,
     _exporters=None,
     _batch: bool = True,
@@ -103,6 +105,13 @@ def init(
         in, linked to their request by ``log_correlation``. Turn it on where there is no agent,
         such as serverless. Errors (uncaught, ``capture_error``, ``logger.exception``), traces and
         ``zharp.log`` are sent either way.
+    :param capture_headers: request and response headers on incoming requests' spans (Django,
+        Flask, FastAPI). Default on. Secret headers — authorization, cookies, API keys, tokens,
+        sessions — are recorded as ``[REDACTED]``; ``{"redact": ["x-tenant"]}`` filters more.
+        ``False`` (or ``ZHARP_CAPTURE_HEADERS=false``) turns it off.
+    :param capture_query_errors: a failed database query is reported once, with the line of your
+        code that ran it, the statement and the driver's code — as a crash when it escapes the
+        request, as handled when your code caught it. Default ``True``.
     :param log_correlation: end each line printed during a request with its ids,
         `` trace_id=<32 hex> span_id=<16 hex>`` (a JSON line gets ``trace_id`` and ``span_id``
         fields instead). Lines outside a request, and those already carrying a trace_id, are left
@@ -126,7 +135,7 @@ def init(
                 return False
             options = _config.resolve(
                 key, service, environment, release, endpoint, sample_rate, logging_level, capture_uncaught, instrument,
-                tracing, capture_bodies, capture_output, logs, log_correlation,
+                tracing, capture_bodies, capture_output, logs, log_correlation, capture_headers, capture_query_errors,
             )
             if options is None:
                 if not quiet:
@@ -230,6 +239,7 @@ def _report(
     try:
         _errors.mark_reported(error)
         attrs = _context.plain(attributes)
+        attrs.update(_errors.query_of(error))
         attrs.update(_errors.exception_attributes(error, handled))
         state.logger.emit(
             LogRecord(
