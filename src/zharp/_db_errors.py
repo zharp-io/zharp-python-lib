@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.trace import SpanKind, StatusCode
 
-from . import _errors
+from . import _errors, _source
 
 _DB_SYSTEM = ("db.system", "db.system.name")
 _STATEMENT = ("db.statement", "db.query.text")
@@ -251,7 +251,12 @@ class DbErrorSpanProcessor(SpanProcessor):
             if failure.done or _errors.is_reported(failure.exc):
                 continue
             try:
-                self._send(failure.exc, format_stack(failure.frames, failure.exc), failure.attributes, failure.span_context)
+                attributes = dict(failure.attributes)
+                # The call site's code, not the driver's: where the app ran the query.
+                code = _source.context_of((f, line) for f, line, _ in failure.frames)
+                if code:
+                    attributes[_source.ATTRIBUTE] = code
+                self._send(failure.exc, format_stack(failure.frames, failure.exc), attributes, failure.span_context)
             except Exception:
                 pass
 

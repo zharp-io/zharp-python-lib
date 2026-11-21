@@ -34,6 +34,8 @@ class Options:
     capture_headers: Any = None
     #: ``capture_query_errors``: failed queries reported with the app's call site and the query.
     capture_query_errors: bool = True
+    #: ``capture_source_context``: the code around the app's frames is sent with each error.
+    capture_source_context: bool = True
     #: ``capture_output``: everything else printed to stdout/stderr is sent as logs too.
     capture_output: bool = True
     #: ``logs``: send what the app logs and prints. Off by default: the Zharp agent reads it.
@@ -132,6 +134,7 @@ def resolve(
     log_correlation: Optional[bool] = None,
     capture_headers: Any = None,
     capture_query_errors: Optional[bool] = None,
+    capture_source_context: Optional[bool] = None,
 ) -> Optional[Options]:
     """The options, explicit values first, then ``ZHARP_*``. None when there is no key."""
     resolved_key = pick(key, env_value("ZHARP_KEY"), env_value("ZHARP_API_KEY"))
@@ -163,6 +166,7 @@ def resolve(
         log_correlation=switch(log_correlation, "ZHARP_LOG_CORRELATION", True),
         capture_headers=_headers.header_settings(capture_headers, env_value("ZHARP_CAPTURE_HEADERS")),
         capture_query_errors=switch(capture_query_errors, "ZHARP_CAPTURE_QUERY_ERRORS", True),
+        capture_source_context=switch(capture_source_context, "ZHARP_CAPTURE_SOURCE_CONTEXT", True),
     )
 
 

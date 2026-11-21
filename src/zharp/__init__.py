@@ -66,6 +66,7 @@ def init(
     log_correlation: Optional[bool] = None,
     capture_headers: Union[bool, Mapping[str, Any], None] = None,
     capture_query_errors: Optional[bool] = None,
+    capture_source_context: Optional[bool] = None,
     quiet: bool = False,
     _exporters=None,
     _batch: bool = True,
@@ -112,6 +113,10 @@ def init(
     :param capture_query_errors: a failed database query is reported once, with the line of your
         code that ran it, the statement and the driver's code — as a crash when it escapes the
         request, as handled when your code caught it. Default ``True``.
+    :param capture_source_context: send the code around each error's lines — read on this
+        server from the app's own files (never installed packages), the innermost five frames,
+        five lines either side — so Zharp shows exactly the code that ran without a repository
+        link. Default ``True``; ``False`` (or ``ZHARP_CAPTURE_SOURCE_CONTEXT=false``) turns it off.
     :param log_correlation: end each line printed during a request with its ids,
         `` trace_id=<32 hex> span_id=<16 hex>`` (a JSON line gets ``trace_id`` and ``span_id``
         fields instead). Lines outside a request, and those already carrying a trace_id, are left
@@ -136,6 +141,7 @@ def init(
             options = _config.resolve(
                 key, service, environment, release, endpoint, sample_rate, logging_level, capture_uncaught, instrument,
                 tracing, capture_bodies, capture_output, logs, log_correlation, capture_headers, capture_query_errors,
+                capture_source_context,
             )
             if options is None:
                 if not quiet:

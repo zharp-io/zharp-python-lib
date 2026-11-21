@@ -22,7 +22,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-from . import _capture, _db_errors, _errors, _headers, _loggers, _output
+from . import _capture, _db_errors, _errors, _headers, _loggers, _output, _source
 from ._config import Options, announce
 from ._context import ContextLogProcessor, ContextSpanProcessor
 from ._version import __version__
@@ -121,6 +121,7 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
             handler.addFilter(_loggers.ExceptionsOnly())
 
     state = State(options, tracer_provider, logger_provider, handler)
+    _source.set_enabled(options.capture_source_context)
     if options.tracing:
         _headers.apply(options.capture_headers)
     if options.instrument:
@@ -136,8 +137,8 @@ def _query_error_sender(provider):
         if _errors.is_reported(exc):
             return
         _errors.mark_reported(exc)
-        attrs = dict(attributes)
-        attrs.update(_errors.exception_attributes(exc, True))
+        attrs = _errors.exception_attributes(exc, True)
+        attrs.update(attributes)
         attrs["exception.stacktrace"] = stack
         attrs["zharp.mechanism"] = "db"
         logger = provider().get_logger("zharp")

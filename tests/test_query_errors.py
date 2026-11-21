@@ -160,3 +160,47 @@ def test_same_failure_seen_by_two_instrumentations_once():
     _fail_query(processor, wrapper)
     processor.force_flush()
     assert len(sent) == 1
+
+
+# ─── the code that ran ───────────────────────────────────────────────────────
+
+
+def _raise_here():
+    total = 1
+    raise ValueError("bad total")  # the line the error points at
+
+
+def test_code_around_the_apps_frames_goes_with_the_error():
+    import json
+
+    from zharp import _source
+
+    try:
+        _raise_here()
+    except ValueError as exc:
+        attributes = _errors.exception_attributes(exc, True)
+    sent = json.loads(attributes[_source.ATTRIBUTE])
+    assert sent[0]["code"].strip() == 'raise ValueError("bad total")  # the line the error points at'
+    assert sent[0]["file"] == __file__
+    assert any("total = 1" in line for line in sent[0]["pre"])
+    assert len(sent[0]["pre"]) <= 5 and len(sent[0]["post"]) <= 5
+    # The caller's frame comes next.
+    assert sent[1]["code"].strip() == "_raise_here()"
+
+
+def test_no_code_from_installed_packages_or_when_off():
+    import json
+
+    from zharp import _source
+
+    try:
+        json.loads("{")
+    except ValueError as exc:
+        error = exc
+    files = [f["file"] for f in json.loads(_source.of_exception(error))]
+    assert files == [__file__]
+    _source.set_enabled(False)
+    try:
+        assert _source.of_exception(error) is None
+    finally:
+        _source.set_enabled(True)
