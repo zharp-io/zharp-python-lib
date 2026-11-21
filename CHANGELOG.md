@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0 (`zharp`) — 2026-11-21
+
+- Request and response headers on request spans (`capture_headers`, `ZHARP_CAPTURE_HEADERS`); secrets are sent as `[Filtered]`.
+- A failed query is reported once, with your code's stack and without the row's values (`capture_query_errors`).
+- The code that ran goes with each error (`capture_source_context`), so the error page shows it without a repository.
+- FastAPI and Flask apps are traced whatever the import order: `zharp.init()` only has to run before the app is created.
+
 ## 0.3.0 (`zharp`) — 2026-11-17
 
 **Behaviour change:** what the app logs and prints is no longer sent unless `logs=True` / `ZHARP_LOGS=true`. Where the Zharp agent reads the app's output it brings those lines in, linked by the `trace_id=… span_id=…` stamp; turn `logs` on where there is no agent. Errors, traces and `zharp.log` are sent as before.
