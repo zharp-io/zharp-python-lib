@@ -14,10 +14,21 @@ import time
 import traceback
 from typing import Any, Dict, Optional
 
-from . import _output
-from ._context import DUPLICATE_EXCEPTION, EXCEPTION_MESSAGE_OVERRIDE, EXCEPTION_TYPE_OVERRIDE
+from . import _output, _source
+from ._context import DUPLICATE_EXCEPTION, EXCEPTION_MESSAGE_OVERRIDE, EXCEPTION_STACK_OVERRIDE, EXCEPTION_TYPE_OVERRIDE
 
 _MARK = "__zharp_reported__"
+
+#: The failed-query watcher (``_db_errors.DbErrorSpanProcessor``) when tracing is on.
+db_errors: Any = None
+
+
+def query_of(exc: Optional[BaseException]) -> Dict[str, Any]:
+    """The failed query ``exc`` came from, as attributes for its one report; {} when none."""
+    try:
+        return (db_errors.claim(exc) or {}) if db_errors is not None else {}
+    except Exception:
+        return {}
 
 
 #: Loggers through which frameworks and servers report exceptions that escaped a request.
@@ -54,13 +65,47 @@ def exception_type(exc: BaseException) -> str:
     return "{}.{}".format(module, cls.__qualname__) if module and module != "builtins" else cls.__qualname__
 
 
+#: Lines of a database error that carry the row's values: Postgres's "DETAIL: Key (email)=(…)",
+#: SQLAlchemy's "[parameters: {…}]". The statement, the constraint and the code say enough.
+_PRIVATE_LINES = re.compile(r"^[ \t]*(?:DETAIL:.*|\[parameters: .*\])[ \t]*\r?\n?", re.M)
+
+
+def is_db_error(exc: BaseException) -> bool:
+    for candidate in (exc, getattr(exc, "orig", None), exc.__cause__):
+        if candidate is None:
+            continue
+        if getattr(candidate, "sqlstate", None) or getattr(candidate, "pgcode", None) or getattr(candidate, "diag", None) is not None:
+            return True
+        if type(candidate).__module__.split(".")[0] in ("sqlalchemy", "psycopg", "psycopg2", "asyncpg", "pymysql", "MySQLdb", "django"):
+            if "DETAIL:" in str(candidate) or "[parameters:" in str(candidate):
+                return True
+    return False
+
+
+def scrub(text: str) -> str:
+    return _PRIVATE_LINES.sub("", text).rstrip("\n") if text else text
+
+
+def message_of(exc: BaseException) -> str:
+    return scrub(str(exc)) if is_db_error(exc) else str(exc)
+
+
+def stack_of(exc: BaseException) -> str:
+    stack = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return scrub(stack) + "\n" if is_db_error(exc) else stack
+
+
 def exception_attributes(exc: BaseException, handled: bool) -> Dict[str, Any]:
-    return {
+    attributes = {
         "exception.type": exception_type(exc),
-        "exception.message": str(exc),
-        "exception.stacktrace": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        "exception.message": message_of(exc),
+        "exception.stacktrace": stack_of(exc),
         "zharp.handled": "true" if handled else "false",
     }
+    code = _source.of_exception(exc)
+    if code:
+        attributes[_source.ATTRIBUTE] = code
+    return attributes
 
 
 def patch_record_exception() -> None:
@@ -78,8 +123,22 @@ def patch_record_exception() -> None:
     def record_exception(self, exception, attributes=None, timestamp=None, escaped=False):
         if is_reported(exception):
             return None
+        # A query span's exception is held: it is reported once, with the query and the app's stack.
+        if db_errors is not None:
+            try:
+                if db_errors.hold(self, exception):
+                    return None
+            except Exception:
+                pass
         mark_reported(exception)
         merged = {"zharp.handled": "false"}
+        merged.update(query_of(exception))
+        code = _source.of_exception(exception)
+        if code:
+            merged[_source.ATTRIBUTE] = code
+        if is_db_error(exception):
+            merged["exception.message"] = message_of(exception)
+            merged["exception.stacktrace"] = stack_of(exception)
         if attributes:
             merged.update(attributes)
         return original(self, exception, merged, timestamp, escaped)
@@ -106,7 +165,13 @@ class ExceptionFilter(logging.Filter):
                 # The handler names the type without its module and takes args[0] as the message;
                 # the processor puts these back so a log groups with the same error on a span.
                 record.__dict__[EXCEPTION_TYPE_OVERRIDE] = exception_type(exc)
-                record.__dict__[EXCEPTION_MESSAGE_OVERRIDE] = str(exc)
+                record.__dict__[EXCEPTION_MESSAGE_OVERRIDE] = message_of(exc)
+                if is_db_error(exc):
+                    record.__dict__[EXCEPTION_STACK_OVERRIDE] = stack_of(exc)
+                record.__dict__.update(query_of(exc))
+                code = _source.of_exception(exc)
+                if code:
+                    record.__dict__[_source.ATTRIBUTE] = code
                 uncaught = name in _UNCAUGHT_LOGGERS or bool(_FLASK_UNCAUGHT.match(str(record.msg)))
                 record.__dict__.setdefault("zharp.handled", "false" if uncaught else "true")
         return True

@@ -11,7 +11,7 @@ import threading
 from typing import Callable, List, Optional, Tuple
 
 from opentelemetry import propagate, trace
-from opentelemetry._logs import get_logger_provider, set_logger_provider
+from opentelemetry._logs import LogRecord, SeverityNumber, get_logger_provider, set_logger_provider
 from opentelemetry.baggage.propagation import W3CBaggagePropagator
 from opentelemetry.propagators.composite import CompositePropagator
 from opentelemetry.sdk._logs import LoggerProvider
@@ -22,7 +22,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-from . import _capture, _errors, _loggers, _output
+from . import _capture, _db_errors, _errors, _headers, _loggers, _output, _source
 from ._config import Options, announce
 from ._context import ContextLogProcessor, ContextSpanProcessor
 from ._version import __version__
@@ -94,6 +94,10 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
         tracer_provider = _tracer_provider(resource, options)
         tracer_provider.add_span_processor(ContextSpanProcessor())
         tracer_provider.add_span_processor(_capture.UrlRedactionSpanProcessor())
+        if options.capture_query_errors:
+            # Before the exporter, so a failed query's held exception is reported before its trace ships.
+            _errors.db_errors = _db_errors.DbErrorSpanProcessor(_query_error_sender(lambda: logger_provider))
+            tracer_provider.add_span_processor(_errors.db_errors)
         tracer_provider.add_span_processor(_span_processor(span_exporter, batch))
 
     logger_provider = _logger_provider(resource)
@@ -117,10 +121,39 @@ def start(options: Options, exporters: Optional[Tuple] = None, batch: bool = Tru
             handler.addFilter(_loggers.ExceptionsOnly())
 
     state = State(options, tracer_provider, logger_provider, handler)
+    _source.set_enabled(options.capture_source_context)
+    if options.tracing:
+        _headers.apply(options.capture_headers)
     if options.instrument:
         state.instrumented = instrument_installed(options.capture_bodies) if options.tracing else instrument_logs_only()
     _start_captures(state)
     return state
+
+
+def _query_error_sender(provider):
+    """Reports a failed query nothing else reported: caught by the app, in the query's span."""
+
+    def send(exc, stack, attributes, span_context) -> None:
+        if _errors.is_reported(exc):
+            return
+        _errors.mark_reported(exc)
+        attrs = _errors.exception_attributes(exc, True)
+        attrs.update(attributes)
+        attrs["exception.stacktrace"] = stack
+        attrs["zharp.mechanism"] = "db"
+        logger = provider().get_logger("zharp")
+        logger.emit(
+            LogRecord(
+                timestamp=_errors.now_ns(),
+                context=trace.set_span_in_context(trace.NonRecordingSpan(span_context)),
+                severity_text="ERROR",
+                severity_number=SeverityNumber.ERROR,
+                body="{}: {}".format(attrs["exception.type"], exc),
+                attributes=attrs,
+            )
+        )
+
+    return send
 
 
 def _start_captures(state: State) -> None:
@@ -305,6 +338,10 @@ def instrument_installed(capture_bodies=None) -> List[str]:
                 _instrument_django_at_setup(module, cls, kwargs)
                 done.append(name)
                 continue
+            if name in _APP_CLASSES:
+                _instrument_each_app(name, module, cls, kwargs)
+                done.append(name)
+                continue
             instrumentor = getattr(importlib.import_module(module), cls)()
             if not instrumentor.is_instrumented_by_opentelemetry:
                 instrumentor.instrument(**kwargs)
@@ -312,6 +349,41 @@ def instrument_installed(capture_bodies=None) -> List[str]:
         except Exception as error:  # a missing instrumentation package or a version it rejects
             _log.debug("Zharp: not instrumenting %s: %s", name, error)
     return done
+
+
+#: The frameworks whose app objects are instrumented one by one: library -> the app class.
+_APP_CLASSES = {"fastapi": "FastAPI", "flask": "Flask"}
+
+
+def _instrument_each_app(name: str, module: str, cls: str, kwargs: dict) -> None:
+    """Instrument every FastAPI / Flask app as it is created.
+
+    OpenTelemetry's ``instrument()`` replaces ``fastapi.FastAPI`` / ``flask.Flask`` with a subclass,
+    which only reaches apps built through that module attribute *after* ``zharp.init()``. The usual
+    file — ``from flask import Flask``, then ``zharp.init(...)``, then ``app = Flask(__name__)`` —
+    builds the app from the original class: untraced, and Flask's CLI (which checks
+    ``isinstance(app, flask.Flask)``) no longer finds it. Hooking the original class's ``__init__``
+    traces the app wherever the name was imported, and leaves the class itself alone."""
+    library = importlib.import_module(name)
+    app_class = getattr(library, _APP_CLASSES[name])
+    original = app_class.__init__
+    if getattr(original, "_zharp", False):
+        return
+    instrumentor = getattr(importlib.import_module(module), cls)
+
+    def __init__(self, *args, **init_kwargs):
+        original(self, *args, **init_kwargs)
+        # The subclass of opentelemetry-instrument (or an instrument() call) traces it itself.
+        if type(self).__name__.startswith("_Instrumented") or getattr(self, "_is_instrumented_by_opentelemetry", False):
+            return
+        try:
+            instrumentor.instrument_app(self, **kwargs)
+        except Exception as error:
+            _log.debug("Zharp: not instrumenting this %s app: %s", name, error)
+
+    __init__._zharp = True  # type: ignore[attr-defined]
+    __init__.__wrapped__ = original  # type: ignore[attr-defined]
+    app_class.__init__ = __init__
 
 
 #: Logs only: the web frameworks, with a no-op tracer. They still read the incoming ``traceparent``
@@ -332,6 +404,10 @@ def instrument_logs_only() -> List[str]:
             kwargs = dict(_INSTRUMENT_OPTIONS.get(name, {}), tracer_provider=noop)
             if name == "django" and not _django_settings_ready():
                 _instrument_django_at_setup(module, cls, kwargs)
+                done.append(name)
+                continue
+            if name in _APP_CLASSES:
+                _instrument_each_app(name, module, cls, kwargs)
                 done.append(name)
                 continue
             instrumentor = getattr(importlib.import_module(module), cls)()

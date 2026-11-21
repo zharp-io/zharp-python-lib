@@ -18,6 +18,11 @@ try:
 except ImportError:  # older SDKs
     from opentelemetry.sdk._logs.export import InMemoryLogExporter as InMemoryLogs
 
+# Imported before zharp.init() (setUpModule), the way most files read: `from flask import Flask`,
+# then zharp.init(...), then the app.
+from fastapi import FastAPI as FastAPIImportedFirst
+from flask import Flask as FlaskImportedFirst
+
 import zharp
 
 SPANS = InMemorySpanExporter()
@@ -234,6 +239,36 @@ class ZharpTest(unittest.TestCase):
         self.assertEqual(len(errors), 1, errors)
         self.assertEqual(errors[0]["exception.type"], "ZeroDivisionError")
         self.assertEqual(errors[0]["zharp.handled"], "false")
+
+    def test_apps_from_classes_imported_before_init(self):
+        import flask
+        from fastapi.testclient import TestClient
+
+        app = FlaskImportedFirst("imported_first")
+
+        @app.route("/ok")
+        def ok():
+            return "ok"
+
+        # Flask's CLI finds the app by isinstance(app, flask.Flask): the class is left alone.
+        self.assertIsInstance(app, flask.Flask)
+        SPANS.clear()
+        self.assertEqual(app.test_client().get("/ok", headers=HEADERS).status_code, 200)
+        server = [s for s in spans() if s.kind.name == "SERVER"]
+        self.assertEqual(len(server), 1, [s.name for s in spans()])
+        self.assertEqual(hex_trace(server[0].context.trace_id), TRACE_ID)
+
+        api = FastAPIImportedFirst()
+
+        @api.get("/ok")
+        def api_ok():
+            return {"ok": True}
+
+        SPANS.clear()
+        self.assertEqual(TestClient(api).get("/ok", headers=HEADERS).status_code, 200)
+        server = [s for s in spans() if s.kind.name == "SERVER"]
+        self.assertEqual(len(server), 1, [s.name for s in spans()])
+        self.assertEqual(server[0].attributes["http.route"], "/ok")
 
     def test_start_span_and_tags(self):
         zharp.set_tag("plan", "pro")

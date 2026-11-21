@@ -29,6 +29,7 @@ DUPLICATE_EXCEPTION = "zharp.duplicate_exception"
 #: Set on a logging record by _errors.ExceptionFilter; applied and removed by ContextLogProcessor.
 EXCEPTION_TYPE_OVERRIDE = "zharp.exception_type"
 EXCEPTION_MESSAGE_OVERRIDE = "zharp.exception_message"
+EXCEPTION_STACK_OVERRIDE = "zharp.exception_stacktrace"
 
 _tags: Dict[str, Any] = {}
 _tags_lock = threading.Lock()
@@ -118,7 +119,11 @@ class ContextLogProcessor(LogRecordProcessor):
                 for key in [k for k in attributes if k.startswith("exception.")] + [DUPLICATE_EXCEPTION, "zharp.handled"]:
                     if key in attributes:
                         del attributes[key]
-            for override, target in ((EXCEPTION_TYPE_OVERRIDE, "exception.type"), (EXCEPTION_MESSAGE_OVERRIDE, "exception.message")):
+            for override, target in (
+                (EXCEPTION_TYPE_OVERRIDE, "exception.type"),
+                (EXCEPTION_MESSAGE_OVERRIDE, "exception.message"),
+                (EXCEPTION_STACK_OVERRIDE, "exception.stacktrace"),
+            ):
                 if override in attributes:
                     if target in attributes or "exception.stacktrace" in attributes:
                         attributes[target] = attributes[override]
