@@ -338,6 +338,10 @@ def instrument_installed(capture_bodies=None) -> List[str]:
                 _instrument_django_at_setup(module, cls, kwargs)
                 done.append(name)
                 continue
+            if name in _APP_CLASSES:
+                _instrument_each_app(name, module, cls, kwargs)
+                done.append(name)
+                continue
             instrumentor = getattr(importlib.import_module(module), cls)()
             if not instrumentor.is_instrumented_by_opentelemetry:
                 instrumentor.instrument(**kwargs)
@@ -345,6 +349,41 @@ def instrument_installed(capture_bodies=None) -> List[str]:
         except Exception as error:  # a missing instrumentation package or a version it rejects
             _log.debug("Zharp: not instrumenting %s: %s", name, error)
     return done
+
+
+#: The frameworks whose app objects are instrumented one by one: library -> the app class.
+_APP_CLASSES = {"fastapi": "FastAPI", "flask": "Flask"}
+
+
+def _instrument_each_app(name: str, module: str, cls: str, kwargs: dict) -> None:
+    """Instrument every FastAPI / Flask app as it is created.
+
+    OpenTelemetry's ``instrument()`` replaces ``fastapi.FastAPI`` / ``flask.Flask`` with a subclass,
+    which only reaches apps built through that module attribute *after* ``zharp.init()``. The usual
+    file — ``from flask import Flask``, then ``zharp.init(...)``, then ``app = Flask(__name__)`` —
+    builds the app from the original class: untraced, and Flask's CLI (which checks
+    ``isinstance(app, flask.Flask)``) no longer finds it. Hooking the original class's ``__init__``
+    traces the app wherever the name was imported, and leaves the class itself alone."""
+    library = importlib.import_module(name)
+    app_class = getattr(library, _APP_CLASSES[name])
+    original = app_class.__init__
+    if getattr(original, "_zharp", False):
+        return
+    instrumentor = getattr(importlib.import_module(module), cls)
+
+    def __init__(self, *args, **init_kwargs):
+        original(self, *args, **init_kwargs)
+        # The subclass of opentelemetry-instrument (or an instrument() call) traces it itself.
+        if type(self).__name__.startswith("_Instrumented") or getattr(self, "_is_instrumented_by_opentelemetry", False):
+            return
+        try:
+            instrumentor.instrument_app(self, **kwargs)
+        except Exception as error:
+            _log.debug("Zharp: not instrumenting this %s app: %s", name, error)
+
+    __init__._zharp = True  # type: ignore[attr-defined]
+    __init__.__wrapped__ = original  # type: ignore[attr-defined]
+    app_class.__init__ = __init__
 
 
 #: Logs only: the web frameworks, with a no-op tracer. They still read the incoming ``traceparent``
@@ -365,6 +404,10 @@ def instrument_logs_only() -> List[str]:
             kwargs = dict(_INSTRUMENT_OPTIONS.get(name, {}), tracer_provider=noop)
             if name == "django" and not _django_settings_ready():
                 _instrument_django_at_setup(module, cls, kwargs)
+                done.append(name)
+                continue
+            if name in _APP_CLASSES:
+                _instrument_each_app(name, module, cls, kwargs)
                 done.append(name)
                 continue
             instrumentor = getattr(importlib.import_module(module), cls)()
