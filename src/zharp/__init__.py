@@ -40,6 +40,8 @@ __all__ = [
     "set_user",
     "shutdown",
     "start_span",
+    "wsgi",
+    "asgi",
 ]
 
 T = TypeVar("T")
@@ -214,6 +216,26 @@ def _emit(severity: SeverityNumber, text: str, body: Any, attributes: Optional[M
         )
     except Exception:
         pass
+
+
+# ─── Any WSGI / ASGI app ───────────────────────────────────────────────────────
+
+
+def wsgi(app: Callable) -> Callable:
+    """Any WSGI app, traced: ``application = zharp.wsgi(application)``. One SERVER span per request,
+    continuing the caller's trace, with its headers. Django, Flask, Falcon, Pyramid, Bottle and Tryton
+    are traced without it."""
+    from . import _frameworks
+
+    return _frameworks.wsgi(app)
+
+
+def asgi(app: Callable) -> Callable:
+    """Any ASGI app, traced: ``app = zharp.asgi(app)``. FastAPI, Starlette and Quart are traced
+    without it."""
+    from . import _frameworks
+
+    return _frameworks.asgi(app)
 
 
 # ─── Errors ────────────────────────────────────────────────────────────────────

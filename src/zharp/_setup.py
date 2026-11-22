@@ -22,7 +22,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-from . import _capture, _db_errors, _errors, _headers, _loggers, _output, _source
+from . import _capture, _db_errors, _errors, _frameworks, _headers, _loggers, _output, _source
 from ._config import Options, announce
 from ._context import ContextLogProcessor, ContextSpanProcessor
 from ._version import __version__
@@ -313,6 +313,11 @@ INSTRUMENTATIONS = [
     ("django", "django", "opentelemetry.instrumentation.django", "DjangoInstrumentor"),
     ("fastapi", "fastapi", "opentelemetry.instrumentation.fastapi", "FastAPIInstrumentor"),
     ("flask", "flask", "opentelemetry.instrumentation.flask", "FlaskInstrumentor"),
+    ("starlette", "starlette", "opentelemetry.instrumentation.starlette", "StarletteInstrumentor"),
+    ("tornado", "tornado", "opentelemetry.instrumentation.tornado", "TornadoInstrumentor"),
+    ("pyramid", "pyramid", "opentelemetry.instrumentation.pyramid", "PyramidInstrumentor"),
+    ("aiohttp", "aiohttp", "opentelemetry.instrumentation.aiohttp_server", "AioHttpServerInstrumentor"),
+    ("celery", "celery", "opentelemetry.instrumentation.celery", "CeleryInstrumentor"),
     ("requests", "requests", "opentelemetry.instrumentation.requests", "RequestsInstrumentor"),
     ("httpx", "httpx", "opentelemetry.instrumentation.httpx", "HTTPXClientInstrumentor"),
     ("psycopg", "psycopg", "opentelemetry.instrumentation.psycopg", "PsycopgInstrumentor"),
@@ -322,7 +327,10 @@ INSTRUMENTATIONS = [
 
 
 #: ASGI's per-message "http send" / "http receive" spans say nothing the request span doesn't.
-_INSTRUMENT_OPTIONS = {"fastapi": {"exclude_spans": ["receive", "send"]}}
+_INSTRUMENT_OPTIONS = {
+    "fastapi": {"exclude_spans": ["receive", "send"]},
+    "tornado": {"server_request_hook": _frameworks.tornado_request_hook},
+}
 
 
 def instrument_installed(capture_bodies=None) -> List[str]:
@@ -348,11 +356,11 @@ def instrument_installed(capture_bodies=None) -> List[str]:
             done.append(name)
         except Exception as error:  # a missing instrumentation package or a version it rejects
             _log.debug("Zharp: not instrumenting %s: %s", name, error)
-    return done
+    return done + _frameworks.install()
 
 
 #: The frameworks whose app objects are instrumented one by one: library -> the app class.
-_APP_CLASSES = {"fastapi": "FastAPI", "flask": "Flask"}
+_APP_CLASSES = {"fastapi": ("fastapi", "FastAPI"), "flask": ("flask", "Flask"), "starlette": ("starlette.applications", "Starlette")}
 
 
 def _instrument_each_app(name: str, module: str, cls: str, kwargs: dict) -> None:
@@ -364,8 +372,8 @@ def _instrument_each_app(name: str, module: str, cls: str, kwargs: dict) -> None
     builds the app from the original class: untraced, and Flask's CLI (which checks
     ``isinstance(app, flask.Flask)``) no longer finds it. Hooking the original class's ``__init__``
     traces the app wherever the name was imported, and leaves the class itself alone."""
-    library = importlib.import_module(name)
-    app_class = getattr(library, _APP_CLASSES[name])
+    where, class_name = _APP_CLASSES[name]
+    app_class = getattr(importlib.import_module(where), class_name)
     original = app_class.__init__
     if getattr(original, "_zharp", False):
         return
@@ -376,8 +384,13 @@ def _instrument_each_app(name: str, module: str, cls: str, kwargs: dict) -> None
         # The subclass of opentelemetry-instrument (or an instrument() call) traces it itself.
         if type(self).__name__.startswith("_Instrumented") or getattr(self, "_is_instrumented_by_opentelemetry", False):
             return
+        # A FastAPI app is a Starlette app too: FastAPI's own instrumentation traces it.
+        if name == "starlette" and any(c.__module__.split(".")[0] == "fastapi" for c in type(self).__mro__):
+            return
         try:
             instrumentor.instrument_app(self, **kwargs)
+            if name == "starlette":
+                _quiet_asgi_messages(self)
         except Exception as error:
             _log.debug("Zharp: not instrumenting this %s app: %s", name, error)
 
@@ -386,10 +399,21 @@ def _instrument_each_app(name: str, module: str, cls: str, kwargs: dict) -> None
     app_class.__init__ = __init__
 
 
+def _quiet_asgi_messages(app) -> None:
+    """Starlette's instrumentation doesn't take exclude_spans as FastAPI's does: set it on the ASGI
+    middleware it added (Starlette builds the stack on the first request), so each request is one
+    span, not one plus an "http send" per message."""
+    from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
+
+    for middleware in getattr(app, "user_middleware", []):
+        if getattr(middleware, "cls", None) is OpenTelemetryMiddleware and isinstance(getattr(middleware, "kwargs", None), dict):
+            middleware.kwargs["exclude_spans"] = ["receive", "send"]
+
+
 #: Logs only: the web frameworks, with a no-op tracer. They still read the incoming ``traceparent``
 #: and ``baggage`` (the request's trace id, user and session go on its logs), but no span is
 #: recorded, and HTTP clients and databases are left alone, so nothing is injected downstream.
-_LOGS_ONLY = ("django", "fastapi", "flask")
+_LOGS_ONLY = ("django", "fastapi", "flask", "starlette", "tornado", "pyramid", "aiohttp")
 
 
 def instrument_logs_only() -> List[str]:
@@ -416,7 +440,7 @@ def instrument_logs_only() -> List[str]:
             done.append(name)
         except Exception as error:
             _log.debug("Zharp: not instrumenting %s: %s", name, error)
-    return done
+    return done + _frameworks.install(noop, only=_frameworks.WEB)
 
 
 def _django_settings_ready() -> bool:
