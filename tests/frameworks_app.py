@@ -201,6 +201,26 @@ def run():
 
         return [asgi_get(app, "/ok/7"), asgi_get(app, "/boom")]
 
+    if FRAMEWORK == "sanic":
+        from sanic import Sanic
+        from sanic.response import text
+
+        app = Sanic("zharp_test")
+
+        @app.get("/ok/<id>")
+        async def ok(request, id):
+            return text("ok")
+
+        @app.get("/boom")
+        async def boom(request):
+            raise ValueError("sanic boom")
+
+        codes = []
+        for path in ("/ok/7", "/boom"):
+            _, response = app.test_client.get(path, headers=HEADERS)
+            codes.append(response.status)
+        return codes
+
     if FRAMEWORK == "wsgi":
         def app(environ, start_response):
             if environ["PATH_INFO"] == "/boom":

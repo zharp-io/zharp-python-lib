@@ -25,6 +25,7 @@ WEB = {
     "aiohttp": ("aiohttp", "/ok/{id}"),
     "bottle": ("bottle", "/ok/<id>"),
     "quart": ("quart", "/ok/<id>"),
+    "sanic": ("sanic_testing", "/ok/<id>"),
     "wsgi": ("webtest", None),
     "asgi": ("httpx", None),
 }
@@ -49,8 +50,13 @@ class FrameworksTest(unittest.TestCase):
                 servers = [s for s in result["spans"] if s["kind"] == "SERVER"]
                 self.assertEqual(len(servers), 2, result["spans"])
                 ok, boom = servers
-                # The caller's traceparent is continued.
-                self.assertTrue(all(s["trace"] == TRACE for s in servers))
+                # The caller's traceparent is continued. (Sanic's test client is httpx, which is
+                # traced itself: its CLIENT span is the caller there.)
+                if framework == "sanic":
+                    callers = {s["trace"] for s in result["spans"] if s["kind"] == "CLIENT"}
+                    self.assertTrue(all(s["trace"] in callers for s in servers), result["spans"])
+                else:
+                    self.assertTrue(all(s["trace"] == TRACE for s in servers))
                 if route:
                     self.assertEqual(ok["route"], route)
                     self.assertTrue(ok["name"].endswith(route), ok["name"])

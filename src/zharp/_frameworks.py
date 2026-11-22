@@ -275,8 +275,88 @@ def _rq(tracer_provider: Any) -> None:
     Job.perform = perform
 
 
+def record_request_headers(span, pairs) -> None:
+    """Request headers on a span, the way the server instrumentations record them: every one,
+    secrets as [REDACTED], unless header capture is off."""
+    import os
+    import re
+
+    from . import _headers
+
+    if not span.is_recording() or not os.environ.get(_headers.SERVER_REQUEST):
+        return
+    secret = [re.compile(p, re.I) for p in (os.environ.get(_headers.SANITIZE) or "").split(",") if p]
+    for name, value in pairs:
+        key = str(name).lower()
+        shown = "[REDACTED]" if any(p.search(key) for p in secret) else value
+        span.set_attribute("http.request.header." + key.replace("-", "_"), [shown])
+
+
+def _sanic(tracer_provider: Any) -> None:
+    """Sanic runs its own server: a SERVER span per request from its request/response
+    middleware, named by the matched route, with the request's headers and any error it raised."""
+    import sanic
+    from opentelemetry import context as otel_context, propagate
+
+    tracer = trace.get_tracer("zharp.sanic", tracer_provider=tracer_provider)
+
+    def route_of(request) -> Optional[str]:
+        route = getattr(request, "route", None)
+        path = getattr(route, "path", None)
+        if path is None:
+            return None
+        # "ok/<id:str>" → "/ok/<id>": the parameter's name, not its type.
+        import re
+
+        return "/" + re.sub(r"<(\w+):[^>]*>", r"<\1>", str(path).lstrip("/"))
+
+    async def on_request(request):
+        parent = propagate.extract({k.lower(): v for k, v in request.headers.items()})
+        route = route_of(request)
+        name = "{} {}".format(request.method, route or request.path)
+        span = tracer.start_span(name, context=parent, kind=SpanKind.SERVER, attributes={
+            "http.request.method": request.method,
+            "url.path": request.path,
+            "url.scheme": request.scheme,
+            **({"http.route": route} if route else {}),
+        })
+        record_request_headers(span, request.headers.items())
+        request.ctx._zharp_span = span
+        request.ctx._zharp_token = otel_context.attach(trace.set_span_in_context(span, parent))
+
+    async def on_response(request, response):
+        span = getattr(request.ctx, "_zharp_span", None)
+        if span is None:
+            return
+        status = getattr(response, "status", 200)
+        span.set_attribute("http.response.status_code", status)
+        if status >= 500:
+            span.set_status(Status(StatusCode.ERROR))
+        span.end()
+        token = getattr(request.ctx, "_zharp_token", None)
+        if token is not None:
+            try:
+                otel_context.detach(token)
+            except Exception:
+                pass
+
+    async def on_exception(request, exception):
+        span = getattr(getattr(request, "ctx", None), "_zharp_span", None)
+        if span is not None and span.is_recording():
+            span.record_exception(exception, attributes={"exception.escaped": True})
+            span.set_status(Status(StatusCode.ERROR, str(exception)))
+
+    def install(app):
+        app.register_middleware(on_request, "request")
+        app.register_middleware(on_response, "response")
+        app.signal("http.lifecycle.exception")(on_exception)
+
+    _hook_init(sanic.Sanic, install, "Sanic")
+
+
 #: (name, library that must be importable, hook)
 HOOKS: List[tuple] = [
+    ("sanic", "sanic", _sanic),
     ("falcon", "falcon", _falcon),
     ("bottle", "bottle", _bottle),
     ("quart", "quart", _quart),
@@ -285,7 +365,7 @@ HOOKS: List[tuple] = [
 ]
 
 #: The ones that are web frameworks: logs only still reads their requests' trace and baggage.
-WEB = ("falcon", "bottle", "quart", "tryton")
+WEB = ("falcon", "bottle", "quart", "tryton", "sanic")
 
 
 def tornado_request_hook(span, handler) -> None:
