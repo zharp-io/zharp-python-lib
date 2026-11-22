@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 (`zharp`) — 2026-11-22
+
+- More frameworks, traced by the same `zharp.init()`: Starlette, Quart, AIOHTTP, Falcon (WSGI and ASGI), Bottle, Pyramid, Tornado and Tryton — one span per request named by its route, headers with secrets filtered, and the error a request raised.
+- Workers: each Celery task and RQ job is a span with its errors, joined to the request that queued it.
+- `zharp.wsgi(app)` / `zharp.asgi(app)` trace any other WSGI or ASGI app.
+- Falcon is traced without OpenTelemetry's Falcon instrumentation, which breaks `falcon.testing` on Falcon 4.
+
 ## 0.4.0 (`zharp`) — 2026-11-21
 
 - Request and response headers on request spans (`capture_headers`, `ZHARP_CAPTURE_HEADERS`); secrets are sent as `[Filtered]`.
