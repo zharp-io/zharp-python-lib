@@ -22,7 +22,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-from . import _capture, _db_errors, _errors, _frameworks, _headers, _loggers, _output, _source
+from . import _capture, _db_errors, _errors, _frameworks, _headers, _loggers, _output, _serverless, _source
 from ._config import Options, announce
 from ._context import ContextLogProcessor, ContextSpanProcessor
 from ._version import __version__
@@ -69,6 +69,8 @@ def resource_for(options: Options) -> Resource:
         attributes["host.name"] = socket.gethostname()
     except Exception:
         pass
+    # Lambda, Cloud Functions: cloud.provider, cloud.platform, faas.name…
+    attributes.update(_serverless.resource_attributes())
     # Resource.create adds OTEL_RESOURCE_ATTRIBUTES; ours win.
     return Resource.create(attributes)
 

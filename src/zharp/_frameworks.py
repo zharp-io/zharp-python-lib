@@ -362,10 +362,17 @@ HOOKS: List[tuple] = [
     ("quart", "quart", _quart),
     ("tryton", "trytond", _tryton),
     ("rq", "rq", _rq),
+    ("chalice", "chalice", lambda tracer_provider: _chalice(tracer_provider)),
 ]
 
 #: The ones that are web frameworks: logs only still reads their requests' trace and baggage.
-WEB = ("falcon", "bottle", "quart", "tryton", "sanic")
+WEB = ("falcon", "bottle", "quart", "tryton", "sanic", "chalice")
+
+
+def _chalice(tracer_provider: Any) -> None:
+    from . import _serverless
+
+    _serverless.chalice_hook(tracer_provider)
 
 
 def tornado_request_hook(span, handler) -> None:
