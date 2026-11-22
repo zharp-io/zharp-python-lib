@@ -160,13 +160,44 @@ and no `traceparent`/`baggage` is added to outgoing requests. Django, FastAPI an
 with a no-op tracer only to read the incoming `traceparent` and `baggage`, so a request's logs still
 carry the caller's trace id, user and session. `zharp.start_span()` runs its work without a span.
 
+## Serverless functions
+
+A function's process is frozen as soon as the handler returns, so decorate the handler. Each
+invocation becomes one SERVER span with the FaaS attributes (`faas.trigger`, `faas.invocation_id`,
+`faas.coldstart`, `faas.name`, `cloud.provider`), continuing the caller's trace when the trigger
+carries a `traceparent` (API Gateway, HTTP functions). An exception the handler raises is reported
+once and raised on. Everything is sent before the result goes back, for at most `flush_timeout`
+seconds (default 2, and on Lambda never past the invocation's remaining time). The handler keeps
+its name, signature and result. Call `zharp.init()` at the top of the module, with `logs=True` if
+the function's logs and prints should be sent too (nothing else collects them there).
+
+```python
+# AWS Lambda, and the Serverless Framework's Python functions
+@zharp.aws_lambda
+def handler(event, context):
+    return {"statusCode": 200, "body": "ok"}
+
+# Google Cloud Functions: HTTP, CloudEvent or background
+@functions_framework.http
+@zharp.cloud_function
+def orders(request):
+    return "ok"
+```
+
+Chalice apps need no decorator: after `zharp.init()` the REST API, the event sources (SQS, SNS, S3,
+schedules, websockets) and `@app.lambda_function` are each traced and flushed per invocation, and
+a view's unhandled exception (Chalice's 500) is reported once. On Cloud Functions the Flask
+request's span is the invocation's, and the flush runs once Flask has ended it, before the response
+goes out. Running on Lambda or Cloud Functions also puts `cloud.provider`, `cloud.platform`,
+`cloud.region` and `faas.*` on the resource, and the function's name is the fallback `service.name`.
+
 ## More
 
 ```python
 zharp.set_tag("region", "eu-west")                  # on every span and log after
 with zharp.start_span("render invoice"):            # a span around some work
     render(invoice)
-zharp.flush()                                       # send now: end of a job or serverless call
+zharp.flush()                                       # send now (waits at most 5 s): end of a job or script
 ```
 
 | Option | Environment | Default |

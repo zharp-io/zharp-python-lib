@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from . import _bodies, _headers
+from . import _bodies, _headers, _serverless
 
 DEFAULT_ENDPOINT = "https://api.zharp.io/api/v1/otlp"
 
@@ -150,7 +150,7 @@ def resolve(
         logging_level = env_value("ZHARP_LOGGING_LEVEL") or "INFO"
     return Options(
         key=resolved_key,
-        service=pick(service, env_value("ZHARP_SERVICE"), env_value("OTEL_SERVICE_NAME"), project_name())
+        service=pick(service, env_value("ZHARP_SERVICE"), env_value("OTEL_SERVICE_NAME"), project_name(), _serverless.function_name())
         or "unknown-service",
         environment=pick(environment, env_value("ZHARP_ENVIRONMENT"), env_value("ZHARP_ENV")),
         release=pick(release, env_value("ZHARP_RELEASE"), env_value("ZHARP_VERSION")),

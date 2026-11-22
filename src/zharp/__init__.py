@@ -40,6 +40,10 @@ __all__ = [
     "set_user",
     "shutdown",
     "start_span",
+    "wsgi",
+    "asgi",
+    "aws_lambda",
+    "cloud_function",
 ]
 
 T = TypeVar("T")
@@ -216,6 +220,66 @@ def _emit(severity: SeverityNumber, text: str, body: Any, attributes: Optional[M
         pass
 
 
+# ─── Any WSGI / ASGI app ───────────────────────────────────────────────────────
+
+
+def wsgi(app: Callable) -> Callable:
+    """Any WSGI app, traced: ``application = zharp.wsgi(application)``. One SERVER span per request,
+    continuing the caller's trace, with its headers. Django, Flask, Falcon, Pyramid, Bottle and Tryton
+    are traced without it."""
+    from . import _frameworks
+
+    return _frameworks.wsgi(app)
+
+
+def asgi(app: Callable) -> Callable:
+    """Any ASGI app, traced: ``app = zharp.asgi(app)``. FastAPI, Starlette and Quart are traced
+    without it."""
+    from . import _frameworks
+
+    return _frameworks.asgi(app)
+
+
+# ─── Serverless functions ──────────────────────────────────────────────────────
+
+
+def aws_lambda(fn: Optional[Callable] = None, *, flush_timeout: Optional[float] = None):
+    """An AWS Lambda handler, traced and flushed per invocation (the Serverless Framework's too):
+
+    .. code-block:: python
+
+        @zharp.aws_lambda
+        def handler(event, context):
+            return {"statusCode": 200, "body": "ok"}
+
+    Each invocation is one SERVER span with the FaaS attributes (``faas.trigger``,
+    ``faas.invocation_id``, ``faas.coldstart``, ``faas.name``, ``cloud.provider``), continuing the
+    caller's trace from API Gateway's headers. An exception the handler raises is reported once and
+    raised on. Everything is sent before the result goes back — for at most ``flush_timeout``
+    seconds (default 2, and never past the invocation's remaining time). The result and the
+    signature are the handler's own. Chalice apps are traced like this without the decorator."""
+    from . import _serverless
+
+    return _serverless.aws_lambda(fn, flush_timeout=flush_timeout)
+
+
+def cloud_function(fn: Optional[Callable] = None, *, flush_timeout: Optional[float] = None):
+    """A Google Cloud Function — HTTP, CloudEvent or background — traced and flushed per invocation:
+
+    .. code-block:: python
+
+        @functions_framework.http
+        @zharp.cloud_function
+        def orders(request):
+            return "ok"
+
+    As :func:`aws_lambda`. An HTTP function's response goes out once everything is sent: Cloud
+    Functions may stop the instance's CPU as soon as it has the response."""
+    from . import _serverless
+
+    return _serverless.cloud_function(fn, flush_timeout=flush_timeout)
+
+
 # ─── Errors ────────────────────────────────────────────────────────────────────
 
 
@@ -315,20 +379,35 @@ def start_span(name: str, fn: Optional[Callable[[], T]] = None, attributes: Opti
 
 def flush(timeout: float = 5.0) -> bool:
     """Send everything queued now and wait up to ``timeout`` seconds — at the end of a script, a
-    job or a serverless function. True when it all went."""
+    job or a serverless function. True when it all went in time."""
     state = _state
     if state is None:
         return True
-    millis = int(timeout * 1000)
-    ok = True
-    for provider in (state.tracer_provider, state.logger_provider):
-        if provider is None:
-            continue
-        try:
-            ok = bool(provider.force_flush(millis)) and ok
-        except Exception:
-            ok = False
-    return ok
+    millis = max(1, int(timeout * 1000))
+    done: list = []
+
+    def send() -> None:
+        ok = True
+        for provider in (state.tracer_provider, state.logger_provider):
+            if provider is None:
+                continue
+            try:
+                ok = bool(provider.force_flush(millis)) and ok
+            except Exception:
+                ok = False
+        done.append(ok)
+
+    # The SDK's force_flush exports right there and doesn't stop at its timeout (a slow endpoint
+    # holds it for the exporter's own 10 s and its retries), so it runs on a thread of its own and
+    # the wait is ours. An export still going when the time is up finishes later.
+    try:
+        worker = threading.Thread(target=send, name="zharp-flush", daemon=True)
+        worker.start()
+    except RuntimeError:  # no new threads while the interpreter shuts down
+        send()
+        return bool(done and done[0])
+    worker.join(max(0.0, timeout))
+    return bool(done and done[0])
 
 
 def shutdown() -> None:
